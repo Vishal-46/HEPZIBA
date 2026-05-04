@@ -13,7 +13,7 @@ DEV_REFERENCE.md
 ARCHITECTURE.md
 HEPZIBA_*.md
 HEPZIBA_*.pdf
-
+HEPZIBA CHEST CLINIC.docx
 # Node & Dependencies
 node_modules/
 npm-debug.log
@@ -41,6 +41,9 @@ build/
 # Logs
 logs/
 *.log
+
+# Project Files
+rep/
 
 # OS Files
 Thumbs.db
