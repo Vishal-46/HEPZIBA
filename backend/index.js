@@ -11,11 +11,15 @@ const pool = new Pool({
 
 app.use(express.json());
 
+// Mount authentication endpoints
+app.use('/auth', require('./auth/authRoutes'));
+// Mount patient endpoints
+app.use('/patients', require('./patients/patientRoutes'));
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(port, () => {
-  console.log();
+  console.log(`Backend API running on port ${port}`);
   pool.connect().then(() => console.log('Connected to Postgres!'))
     .catch(e => console.error('Postgres connection error:', e));
 });
-
