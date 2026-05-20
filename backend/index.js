@@ -15,6 +15,12 @@ app.use(express.json());
 app.use('/auth', require('./auth/authRoutes'));
 // Mount patient endpoints
 app.use('/patients', require('./patients/patientRoutes'));
+// Mount appointment endpoints
+app.use('/appointments', require('./appointments/appointmentRoutes'));
+// Mount doctor endpoints
+app.use('/doctors', require('./doctors/doctorRoutes'));
+// Mount admin endpoints
+app.use('/admin', require('./admin/adminRoutes'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
