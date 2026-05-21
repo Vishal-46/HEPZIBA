@@ -11,9 +11,21 @@ exports.createAppointment = async (req, res) => {
     const q = await pool.query('SELECT id FROM patients WHERE user_id=$1', [req.user.id]);
     if (!q.rows.length) return res.status(400).json({ error: 'Patient profile not found' });
     const patient_id = q.rows[0].id;
+    const tokenQ = await pool.query(
+      `SELECT COALESCE(MAX(token_number), 0) + 1 AS next_token
+       FROM appointments
+       WHERE doctor_id=$1
+       AND DATE(scheduled_at) = DATE($2)`,
+      [doctor_id, scheduled_at]
+    );
+
+    const tokenNumber = tokenQ.rows[0].next_token;
+
     const result = await pool.query(
-      `INSERT INTO appointments (patient_id, doctor_id, scheduled_at, reason) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [patient_id, doctor_id, scheduled_at, reason]
+      `INSERT INTO appointments (patient_id, doctor_id, scheduled_at, reason, token_number)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [patient_id, doctor_id, scheduled_at, reason, tokenNumber]
     );
     res.json({ message: 'Appointment booked', appointment: result.rows[0] });
   } catch (e) {
@@ -61,5 +73,22 @@ exports.getForMe = async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to fetch appointments' });
+  }
+};
+
+// Patient-visible doctor catalog for booking UI
+exports.listDoctorsForPatients = async (req, res) => {
+  try {
+    const doctorsQ = await pool.query(
+      `SELECT d.id AS doctor_id, u.name, d.specialty, d.phone, d.bio
+       FROM doctors d
+       INNER JOIN users u ON u.id = d.user_id
+       WHERE u.active = TRUE
+       ORDER BY u.name ASC`
+    );
+    return res.json(doctorsQ.rows);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to fetch doctor list' });
   }
 };

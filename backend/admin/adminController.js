@@ -51,7 +51,15 @@ exports.deleteUser = async (req, res) => {
 // GET /admin/appointments
 exports.listAppointments = async (req, res) => {
   try {
-    const q = await pool.query('SELECT * FROM appointments');
+    const q = await pool.query(
+      `SELECT a.*, pu.name AS patient_name, du.name AS doctor_name
+       FROM appointments a
+       LEFT JOIN patients p ON p.id = a.patient_id
+       LEFT JOIN users pu ON pu.id = p.user_id
+       LEFT JOIN doctors d ON d.id = a.doctor_id
+       LEFT JOIN users du ON du.id = d.user_id
+       ORDER BY a.scheduled_at DESC`
+    );
     res.json(q.rows);
   } catch (e) {
     console.error(e); res.status(500).json({ error: 'Failed to list appointments' });

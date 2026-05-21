@@ -21,6 +21,12 @@ app.use('/appointments', require('./appointments/appointmentRoutes'));
 app.use('/doctors', require('./doctors/doctorRoutes'));
 // Mount admin endpoints
 app.use('/admin', require('./admin/adminRoutes'));
+// Mount prescription endpoints
+app.use('/prescriptions', require('./prescriptions/prescriptionRoutes'));
+// Mount billing endpoints
+app.use('/billing', require('./billing/billingRoutes'));
+// Mount inventory endpoints
+app.use('/inventory', require('./inventory/inventoryRoutes'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
