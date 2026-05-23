@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@expo-google-fonts/manrope": "^0.4.2",
+    "@react-native-community/datetimepicker": "8.4.4",
     "expo": "~54.0.33",
     "expo-font": "^55.0.8",
     "expo-status-bar": "~3.0.9",

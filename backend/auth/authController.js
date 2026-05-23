@@ -84,7 +84,7 @@ exports.registerAdmin = async (req, res) => {
 
 // --------- DOCTOR REGISTRATION (ADMIN ONLY) ----------
 exports.registerDoctor = async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, specialty, phone, bio } = req.body;
   if (!name || !email || !password) return res.status(400).json({ error: 'Missing required field.' });
   const normalizedEmail = String(email).trim().toLowerCase();
 
@@ -94,10 +94,28 @@ exports.registerDoctor = async (req, res) => {
 
     const hash = await hashPassword(password);
     // Doctor is immediately verified
-    await pool.query(`
+    const userInsert = await pool.query(`
       INSERT INTO users (name, email, password, role, email_verified)
       VALUES ($1, $2, $3, 'doctor', TRUE)
+      RETURNING id
     `, [name, normalizedEmail, hash]);
+
+    const userId = userInsert.rows[0].id;
+    const doctorExists = (await pool.query('SELECT 1 FROM doctors WHERE user_id=$1', [userId])).rowCount > 0;
+    if (doctorExists) {
+      await pool.query(
+        `UPDATE doctors
+         SET specialty=COALESCE($1,specialty), phone=COALESCE($2,phone), bio=COALESCE($3,bio)
+         WHERE user_id=$4`,
+        [specialty || null, phone || null, bio || null, userId]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO doctors (user_id, specialty, phone, bio)
+         VALUES ($1, $2, $3, $4)`,
+        [userId, specialty || null, phone || null, bio || null]
+      );
+    }
 
     res.json({ message: 'Doctor registration successful.' });
   } catch (e) {

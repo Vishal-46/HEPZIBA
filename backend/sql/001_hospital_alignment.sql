@@ -36,6 +36,19 @@ BEGIN
   END IF;
 END $$;
 
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'appointments'
+      AND column_name = 'date_time'
+      AND is_nullable = 'NO'
+  ) THEN
+    EXECUTE 'ALTER TABLE appointments ALTER COLUMN date_time DROP NOT NULL';
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_appointments_doctor_scheduled_at
   ON appointments(doctor_id, scheduled_at);
 

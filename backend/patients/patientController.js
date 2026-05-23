@@ -55,6 +55,28 @@ exports.updateMe = async (req, res) => {
     spo2,
   } = req.body;
   try {
+    if (email) {
+      const duplicateEmail = await pool.query(
+        'SELECT id FROM users WHERE LOWER(email)=LOWER($1) AND id <> $2',
+        [email, req.user.id]
+      );
+      if (duplicateEmail.rows.length) {
+        return res.status(400).json({ error: 'Email already in use.' });
+      }
+    }
+
+    if (mobile && !/^\d{10,15}$/.test(String(mobile))) {
+      return res.status(400).json({ error: 'Mobile must be 10-15 digits.' });
+    }
+
+    if (aadhar_number && !/^\d{12}$/.test(String(aadhar_number))) {
+      return res.status(400).json({ error: 'Aadhar number must be 12 digits.' });
+    }
+
+    if (spo2 !== undefined && (Number(spo2) < 0 || Number(spo2) > 100)) {
+      return res.status(400).json({ error: 'SpO2 must be between 0 and 100.' });
+    }
+
     if (name)
       await pool.query('UPDATE users SET name=$1, updated_at=NOW() WHERE id=$2', [name, req.user.id]);
     if (email)
