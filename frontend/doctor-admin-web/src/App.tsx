@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import './App.css';
 
 type Role = 'doctor' | 'admin';
@@ -115,6 +115,10 @@ function DoctorPanel({ token }: { token: string }) {
   const [status, setStatus] = useState('confirmed');
   const [notes, setNotes] = useState('');
 
+  useEffect(() => {
+    load();
+  }, []);
+
   const selected = useMemo(() => appointments.find((a) => a.id === selectedId) || null, [appointments, selectedId]);
 
   const load = async () => {
@@ -181,55 +185,129 @@ function DoctorPanel({ token }: { token: string }) {
     }
   };
 
-  return (
-    <div className="grid2">
-      <section className="card">
-        <div className="sectionTop">
-          <h2>My Appointments</h2>
-          <button className="primaryBtn" onClick={load}>Refresh</button>
-        </div>
-        {!!error && <p className="errorText">{error}</p>}
-        {appointments.map((a) => (
-          <button
-            key={a.id}
-            className={`rowBtn ${selectedId === a.id ? 'active' : ''}`}
-            onClick={() => setSelectedId(a.id)}
-          >
-            <strong>{a.patient_name || 'Patient'}</strong>
-            <span>{new Date(a.scheduled_at).toLocaleString()} | {a.status}</span>
-          </button>
-        ))}
-      </section>
+  const stats = useMemo(() => {
+    const tally = { total: appointments.length, pending: 0, confirmed: 0, done: 0, cancelled: 0 };
+    appointments.forEach((a) => {
+      if (a.status && tally[a.status as keyof typeof tally] !== undefined) {
+        tally[a.status as keyof typeof tally] += 1;
+      }
+    });
+    return tally;
+  }, [appointments]);
 
-      <section className="card">
-        <h2>Appointment Actions</h2>
-        {selected ? (
-          <>
-            <p>Appointment #{selected.id}</p>
-            <label>
-              Status
-              <select value={status} onChange={(e) => setStatus(e.target.value)}>
-                <option value="pending">pending</option>
-                <option value="confirmed">confirmed</option>
-                <option value="done">done</option>
-                <option value="cancelled">cancelled</option>
-              </select>
-            </label>
-            <label>
-              Notes
-              <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={4} />
-            </label>
-            <div className="inlineBtns">
-              <button className="primaryBtn" onClick={updateAppointment}>Update</button>
-              <button className="ghostBtn" onClick={createPrescription}>Add Prescription</button>
+  const todayList = useMemo(() => {
+    const today = new Date().toDateString();
+    return appointments.filter((a) => new Date(a.scheduled_at).toDateString() === today);
+  }, [appointments]);
+
+  return (
+    <div className="doctorLayout">
+      <aside className="card doctorSidebar">
+        <p className="clinicTag">Hepziba Chest Clinic</p>
+        <h2>Doctor Desk</h2>
+        <p className="muted">Manage your schedule, update visit status, and add prescriptions.</p>
+        <div className="statGrid">
+          <div className="statCard">
+            <span>Total</span>
+            <strong>{stats.total}</strong>
+          </div>
+          <div className="statCard">
+            <span>Confirmed</span>
+            <strong>{stats.confirmed}</strong>
+          </div>
+          <div className="statCard">
+            <span>Pending</span>
+            <strong>{stats.pending}</strong>
+          </div>
+          <div className="statCard">
+            <span>Done</span>
+            <strong>{stats.done}</strong>
+          </div>
+        </div>
+        <button className="primaryBtn" onClick={load}>Refresh Schedule</button>
+        {!!error && <p className="errorText">{error}</p>}
+      </aside>
+
+      <div className="doctorContent">
+        <section className="card">
+          <div className="sectionTop">
+            <div>
+              <h2>Today&apos;s Schedule</h2>
+              <p className="muted">{new Date().toDateString()}</p>
             </div>
-          </>
-        ) : (
-          <p>Select an appointment to proceed.</p>
-        )}
-      </section>
+            <span className="pill">{todayList.length} visits</span>
+          </div>
+          <div className="appointmentList">
+            {(todayList.length ? todayList : appointments).map((a) => (
+              <button
+                key={a.id}
+                className={`appointmentRow ${selectedId === a.id ? 'active' : ''}`}
+                onClick={() => {
+                  setSelectedId(a.id);
+                  setStatus(a.status || 'confirmed');
+                  setNotes(a.notes || '');
+                }}
+              >
+                <div>
+                  <strong>{a.patient_name || 'Patient'}</strong>
+                  <span className="appointmentMeta">{formatDate(a.scheduled_at)}</span>
+                </div>
+                <span className={`pill status ${a.status || 'pending'}`}>{a.status || 'pending'}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="card detailCard">
+          <h2>Appointment Details</h2>
+          {selected ? (
+            <>
+              <div className="detailGrid">
+                <div>
+                  <p className="label">Patient</p>
+                  <p>{selected.patient_name || 'Patient'}</p>
+                </div>
+                <div>
+                  <p className="label">Schedule</p>
+                  <p>{formatDate(selected.scheduled_at)}</p>
+                </div>
+                <div>
+                  <p className="label">Reason</p>
+                  <p>{selected.reason || 'Respiratory consultation'}</p>
+                </div>
+                <div>
+                  <p className="label">Status</p>
+                  <select value={status} onChange={(e) => setStatus(e.target.value)}>
+                    <option value="pending">pending</option>
+                    <option value="confirmed">confirmed</option>
+                    <option value="done">done</option>
+                    <option value="cancelled">cancelled</option>
+                  </select>
+                </div>
+              </div>
+              <label>
+                Notes
+                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={4} />
+              </label>
+              <div className="inlineBtns">
+                <button className="primaryBtn" onClick={updateAppointment}>Update Status</button>
+                <button className="ghostBtn" onClick={createPrescription}>Add Prescription</button>
+              </div>
+            </>
+          ) : (
+            <p className="muted">Select an appointment to view details and add notes.</p>
+          )}
+        </section>
+      </div>
     </div>
   );
+}
+
+function formatDate(value?: string) {
+  if (!value) return 'Date unavailable';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Date unavailable';
+  return date.toLocaleString();
 }
 
 function AdminPanel({ token }: { token: string }) {

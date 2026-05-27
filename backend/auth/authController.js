@@ -1,5 +1,6 @@
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
+const https = require('https');
 const { hashPassword, checkPassword, generateCode } = require('../utils/crypto');
 const { sendMail } = require('../mailer/mailer');
 const { generatePatientCode } = require('../utils/patientCode');
@@ -10,6 +11,42 @@ function signToken(user) {
     { id: user.id, role: user.role, email: user.email },
     process.env.JWT_SECRET, { expiresIn: '4h' }
   );
+}
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function verifyGoogleIdToken(idToken) {
+  const payload = await fetchJson(
+    `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
+  );
+
+  if (!payload || payload.error) {
+    throw new Error(payload?.error_description || 'Invalid Google token');
+  }
+
+  if (process.env.GOOGLE_CLIENT_ID && payload.aud !== process.env.GOOGLE_CLIENT_ID) {
+    throw new Error('Google token audience mismatch');
+  }
+
+  if (payload.email_verified !== 'true' && payload.email_verified !== true) {
+    throw new Error('Google email not verified');
+  }
+
+  return payload;
 }
 
 // --------- PATIENT REGISTRATION ----------
@@ -233,5 +270,74 @@ exports.resetPassword = async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Reset failed.' });
+  }
+};
+
+// --------- GOOGLE LOGIN ----------
+exports.googleLogin = async (req, res) => {
+  const { idToken } = req.body;
+  if (!idToken) return res.status(400).json({ error: 'Missing id token.' });
+
+  try {
+    const googlePayload = await verifyGoogleIdToken(idToken);
+    const normalizedEmail = String(googlePayload.email || '').trim().toLowerCase();
+    if (!normalizedEmail) return res.status(400).json({ error: 'Email not found in Google token.' });
+
+    const existing = await pool.query('SELECT * FROM users WHERE email=$1', [normalizedEmail]);
+
+    if (existing.rows.length) {
+      const user = existing.rows[0];
+      if (!user.active) return res.status(401).json({ error: 'Account deactivated.' });
+      if (user.role !== 'patient') return res.status(403).json({ error: 'Account role not allowed.' });
+
+      if (!user.email_verified) {
+        await pool.query(
+          `UPDATE users
+           SET email_verified=TRUE, verification_code=NULL, verification_code_expires_at=NULL
+           WHERE id=$1`,
+          [user.id]
+        );
+      }
+
+      const patientExists = (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [user.id])).rowCount > 0;
+      if (!patientExists) {
+        const patientCode = generatePatientCode(user.id);
+        await pool.query(
+          `INSERT INTO patients (user_id, patient_code)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id) DO UPDATE SET patient_code = EXCLUDED.patient_code`,
+          [user.id, patientCode]
+        );
+      }
+
+      const token = signToken(user);
+      return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    }
+
+    const name = String(googlePayload.name || googlePayload.given_name || 'Patient').trim();
+    const tempPassword = `${generateCode(12)}${generateCode(12)}`;
+    const hash = await hashPassword(tempPassword);
+
+    const inserted = await pool.query(
+      `INSERT INTO users (name, email, password, role, email_verified)
+       VALUES ($1, $2, $3, 'patient', TRUE)
+       RETURNING id, name, email, role`,
+      [name, normalizedEmail, hash]
+    );
+
+    const user = inserted.rows[0];
+    const patientCode = generatePatientCode(user.id);
+    await pool.query(
+      `INSERT INTO patients (user_id, patient_code)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE SET patient_code = EXCLUDED.patient_code`,
+      [user.id, patientCode]
+    );
+
+    const token = signToken(user);
+    return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (e) {
+    console.error(e);
+    return res.status(401).json({ error: e instanceof Error ? e.message : 'Google login failed.' });
   }
 };

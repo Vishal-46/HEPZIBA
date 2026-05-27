@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -10,8 +10,13 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import * as WebBrowser from 'expo-web-browser';
+import * as AuthSession from 'expo-auth-session';
+import * as Google from 'expo-auth-session/providers/google';
 import { API_BASE_URL } from '../config/api';
 import { COLOR, FONT, RADIUS, SHADOW, SPACING } from '../../theme';
+
+WebBrowser.maybeCompleteAuthSession();
 
 type User = {
   id: number;
@@ -41,6 +46,19 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
   const [isLoading, setIsLoading] = useState(false);
   const [errorText, setErrorText] = useState('');
   const [infoText, setInfoText] = useState('');
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const googleAndroidClientId = process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
+  const googleExpoClientId = process.env.EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID;
+  const googleWebClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+
+  const [googleRequest, googleResponse, googlePromptAsync] = Google.useAuthRequest({
+    androidClientId: googleAndroidClientId,
+    expoClientId: googleExpoClientId,
+    webClientId: googleWebClientId,
+    scopes: ['openid', 'profile', 'email'],
+    responseType: AuthSession.ResponseType.IdToken,
+    extraParams: { prompt: 'select_account' },
+  });
 
   const canSubmit = useMemo(() => {
     if (!email.trim()) return false;
@@ -167,6 +185,63 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
     }
   };
 
+  const signInWithGoogle = async () => {
+    if (isGoogleLoading || isLoading) return;
+
+    if (!googleAndroidClientId && !googleExpoClientId && !googleWebClientId) {
+      setErrorText('Google login is not configured yet.');
+      return;
+    }
+
+    setIsGoogleLoading(true);
+    setErrorText('');
+    await googlePromptAsync();
+  };
+
+  useEffect(() => {
+    const finishGoogleLogin = async () => {
+      if (!googleResponse) return;
+
+      if (googleResponse.type !== 'success') {
+        if (googleResponse.type === 'error') {
+          setErrorText(googleResponse.error?.message || 'Google login failed.');
+        }
+        setIsGoogleLoading(false);
+        return;
+      }
+
+      try {
+        const idToken =
+          googleResponse.authentication?.idToken ||
+          googleResponse.params?.id_token;
+        if (!idToken) throw new Error('Google login did not return a valid token.');
+
+        const response = await fetch(`${API_BASE_URL}/auth/google`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        });
+
+        const payload = await safeJson(response);
+        if (!response.ok) {
+          throw new Error(payload?.error ?? 'Google login failed.');
+        }
+
+        if (!payload?.token || !payload?.user) {
+          throw new Error('Invalid login response from server.');
+        }
+
+        onLoginSuccess({ token: payload.token, user: payload.user });
+      } catch (error) {
+        setErrorText(error instanceof Error ? error.message : 'Google login failed.');
+      } finally {
+        setIsGoogleLoading(false);
+      }
+    };
+
+    finishGoogleLogin();
+  }, [googleResponse, onLoginSuccess]);
+
   return (
     <SafeAreaView style={s.safeArea}>
       <KeyboardAvoidingView
@@ -279,6 +354,25 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
                   {mode === 'verify' && 'Verify and Continue'}
                   {mode === 'forgot' && (!code.trim() ? 'Send Reset OTP' : 'Reset Password')}
                 </Text>
+              )}
+            </TouchableOpacity>
+
+            <View style={s.orRow}>
+              <View style={s.orLine} />
+              <Text style={s.orText}>OR</Text>
+              <View style={s.orLine} />
+            </View>
+
+            <TouchableOpacity
+              style={[s.secondaryBtn, (isGoogleLoading || !googleRequest) && s.primaryBtnDisabled]}
+              onPress={signInWithGoogle}
+              activeOpacity={0.85}
+              disabled={isGoogleLoading || !googleRequest}
+            >
+              {isGoogleLoading ? (
+                <ActivityIndicator color={COLOR.primary} />
+              ) : (
+                <Text style={s.secondaryBtnText}>Continue with Google</Text>
               )}
             </TouchableOpacity>
 
@@ -424,6 +518,20 @@ const s = StyleSheet.create({
     fontSize: 16,
     letterSpacing: 0.2,
   },
+  secondaryBtn: {
+    backgroundColor: COLOR.surface,
+    borderRadius: RADIUS.md,
+    paddingVertical: SPACING.m,
+    alignItems: 'center',
+    marginTop: SPACING.m,
+    borderWidth: 1,
+    borderColor: COLOR.accent,
+  },
+  secondaryBtnText: {
+    color: COLOR.primary,
+    fontFamily: FONT.bold,
+    fontSize: 15,
+  },
   switchBtn: {
     marginTop: SPACING.l,
     alignItems: 'center',
@@ -432,5 +540,22 @@ const s = StyleSheet.create({
     color: COLOR.primary,
     fontFamily: FONT.medium,
     fontSize: 14,
+  },
+  orRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: SPACING.l,
+  },
+  orLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: COLOR.accent,
+    opacity: 0.4,
+  },
+  orText: {
+    marginHorizontal: SPACING.s,
+    color: COLOR.primary,
+    fontFamily: FONT.medium,
+    fontSize: 12,
   },
 });

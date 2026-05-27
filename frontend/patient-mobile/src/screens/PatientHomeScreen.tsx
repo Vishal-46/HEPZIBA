@@ -50,9 +50,35 @@ type Prescription = { id: number; doctor_name?: string; prescribed_on?: string; 
 type Invoice = { id: number; invoice_date?: string; total_amount?: number; status?: string };
 
 type Props = { token: string; user: User; onLogout: () => void };
-type TabKey = 'home' | 'book' | 'records' | 'profile';
+type TabKey = 'home' | 'book' | 'records' | 'profile' | 'clinic';
 
 const PRIORITY_OPTIONS = ['normal', 'urgent'];
+const CLINIC_DETAILS = {
+  name: 'Hepziba Chest Clinic',
+  doctor: 'Dr. T. Joseph Pratheeban, DCH, MD (Respiratory Medicine)',
+  specialty: 'Pulmonologist & Bronchoscopist',
+  address: 'Opposite to WCC Entrance, White House Street, Nagercoil',
+  mobile: '9500907968',
+};
+
+const CLINIC_HIGHLIGHTS = [
+  'Specialist chest and respiratory care',
+  'Friendly appointment system with token number',
+  'Your records and prescriptions in one place',
+];
+
+const HOW_TO_USE = [
+  'Book Appointment: pick a doctor and time, add your reason and symptoms.',
+  'Consult Doctor: visit the clinic at your token time for consultation.',
+  'View Records: check appointments, prescriptions, and bills anytime.',
+  'Update Profile: keep your contact and health details updated.',
+];
+
+const BEFORE_VISIT = [
+  'Bring any previous reports or test results.',
+  'Keep your phone number active for updates.',
+  'Arrive a little early for smooth check-in.',
+];
 
 export default function PatientHomeScreen({ token, user, onLogout }: Props) {
   const topInset = Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0;
@@ -255,10 +281,10 @@ export default function PatientHomeScreen({ token, user, onLogout }: Props) {
 
         {tab === 'home' && (
           <>
-            <View style={s.card}>
-              <Text style={s.cardLabel}>Next Appointment</Text>
-              {nextAppointment ? (
-                <>
+          <View style={s.card}>
+            <Text style={s.cardLabel}>Next Appointment</Text>
+            {nextAppointment ? (
+              <>
                   <Text style={s.cardTitle}>{formatDate(nextAppointment)}</Text>
                   <Text style={s.cardMeta}>Doctor: {nextAppointment.doctor_name || 'Assigned doctor'}</Text>
                   <Text style={s.cardMeta}>Token: #{nextAppointment.token_number || '-'}</Text>
@@ -274,6 +300,9 @@ export default function PatientHomeScreen({ token, user, onLogout }: Props) {
               </TouchableOpacity>
               <TouchableOpacity style={[s.secondaryBtn, s.fullWidthButton]} onPress={() => setTab('records')} activeOpacity={0.85}>
                 <Text style={s.secondaryBtnText}>View Records</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.secondaryBtn, s.fullWidthButton]} onPress={() => setTab('clinic')} activeOpacity={0.85}>
+                <Text style={s.secondaryBtnText}>Clinic Details</Text>
               </TouchableOpacity>
             </View>
           </>
@@ -381,6 +410,31 @@ export default function PatientHomeScreen({ token, user, onLogout }: Props) {
             </TouchableOpacity>
           </View>
         )}
+
+        {tab === 'clinic' && (
+          <>
+            <View style={s.card}>
+              <Text style={s.cardTitle}>About the Clinic</Text>
+              <Text style={s.rowTitle}>{CLINIC_DETAILS.name}</Text>
+              <Text style={s.rowMeta}>{CLINIC_DETAILS.specialty}</Text>
+              <Text style={s.rowMeta}>Doctor: {CLINIC_DETAILS.doctor}</Text>
+              <Text style={s.rowMeta}>Address: {CLINIC_DETAILS.address}</Text>
+              <Text style={s.rowMeta}>Mobile: {CLINIC_DETAILS.mobile}</Text>
+            </View>
+
+            <SectionCard title="Why Patients Choose Us">
+              <InfoList items={CLINIC_HIGHLIGHTS} />
+            </SectionCard>
+
+            <SectionCard title="How to Use This App">
+              <InfoList items={HOW_TO_USE} />
+            </SectionCard>
+
+            <SectionCard title="Before You Visit">
+              <InfoList items={BEFORE_VISIT} />
+            </SectionCard>
+          </>
+        )}
       </ScrollView>
 
       <View style={s.bottomTabs}>
@@ -388,6 +442,7 @@ export default function PatientHomeScreen({ token, user, onLogout }: Props) {
         <Tab label="Book" active={tab === 'book'} onPress={() => setTab('book')} />
         <Tab label="Records" active={tab === 'records'} onPress={() => setTab('records')} />
         <Tab label="Profile" active={tab === 'profile'} onPress={() => setTab('profile')} />
+        <Tab label="Clinic" active={tab === 'clinic'} onPress={() => setTab('clinic')} />
       </View>
 
       <Modal visible={showBookModal} transparent animationType="slide">
@@ -444,6 +499,16 @@ function SectionCard({ title, children }: { title: string; children: React.React
     <View style={s.card}>
       <Text style={s.cardTitle}>{title}</Text>
       {children}
+    </View>
+  );
+}
+
+function InfoList({ items }: { items: string[] }) {
+  return (
+    <View>
+      {items.map((item) => (
+        <Text key={item} style={s.rowMeta}>{`- ${item}`}</Text>
+      ))}
     </View>
   );
 }

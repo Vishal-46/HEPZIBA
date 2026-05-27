@@ -8,6 +8,7 @@ router.post('/verify-email', ctrl.verifyEmail);
 
 // Login
 router.post('/login', ctrl.login);
+router.post('/google', ctrl.googleLogin);
 
 // Password reset
 router.post('/forgot-password', ctrl.forgotPassword);
