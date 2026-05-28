@@ -20,18 +20,55 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [errorText, setErrorText] = useState('');
+  const [infoText, setInfoText] = useState('');
 
   if (!session) {
     return (
-      <div className="shell">
-        <AuthCard
-          onSuccess={(nextSession) => {
-            setSession(nextSession);
-            setErrorText('');
-          }}
-          onError={setErrorText}
-        />
-        {!!errorText && <p className="errorText">{errorText}</p>}
+      <div className="authShell">
+        <div className="authLayout">
+          <section className="authHero">
+            <span className="clinicBadge">Hepziba Chest Clinic</span>
+            <h1>Clinic Command Center</h1>
+            <p className="lead">
+              Secure access for doctors and administrators to manage appointments, review
+              patient updates, and keep the clinic running on time.
+            </p>
+            <div className="heroGrid">
+              <div className="heroCard">
+                <h3>Doctor Desk</h3>
+                <p>Track today&apos;s schedule, update visit status, and add prescriptions in one place.</p>
+              </div>
+              <div className="heroCard">
+                <h3>Admin Control</h3>
+                <p>Oversee staff accounts, inventory levels, and patient flow with live summaries.</p>
+              </div>
+            </div>
+            <div className="heroFooter">
+              <div>
+                <p className="statValue">15 min</p>
+                <p className="statLabel">Average check-in window</p>
+              </div>
+              <div>
+                <p className="statValue">96%</p>
+                <p className="statLabel">Same-day appointment closure</p>
+              </div>
+            </div>
+          </section>
+
+          <AuthPanel
+            onSuccess={(nextSession) => {
+              setSession(nextSession);
+              setErrorText('');
+              setInfoText('');
+            }}
+            onError={setErrorText}
+            onInfo={setInfoText}
+          />
+        </div>
+        <div className="authMessages">
+          {!!errorText && <p className="errorText">{errorText}</p>}
+          {!!infoText && <p className="infoText">{infoText}</p>}
+        </div>
       </div>
     );
   }
@@ -51,10 +88,10 @@ export default function App() {
       <header className="topBar">
         <div>
           <h1>Hepziba Clinic Control Panel</h1>
-          <p>{session.user.name} ({session.user.role})</p>
-        </div>
-        <button className="ghostBtn" onClick={() => setSession(null)}>Log out</button>
-      </header>
+        <p>{session.user.name} ({session.user.role})</p>
+      </div>
+      <button className="ghostBtn" onClick={() => setSession(null)}>Log out</button>
+    </header>
 
       {role === 'doctor' ? (
         <DoctorPanel token={session.token} />
@@ -65,45 +102,158 @@ export default function App() {
   );
 }
 
-function AuthCard({ onSuccess, onError }: { onSuccess: (session: Session) => void; onError: (msg: string) => void }) {
+function AuthPanel({
+  onSuccess,
+  onError,
+  onInfo,
+}: {
+  onSuccess: (session: Session) => void;
+  onError: (msg: string) => void;
+  onInfo: (msg: string) => void;
+}) {
+  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
+  const [inviteMode, setInviteMode] = useState(false);
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [role, setRole] = useState<Role>('doctor');
+  const [adminToken, setAdminToken] = useState('');
   const [loading, setLoading] = useState(false);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     onError('');
+    onInfo('');
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
-      });
-      const payload = await safeJson(response);
-      if (!response.ok) throw new Error(payload?.error || 'Login failed');
-      onSuccess(payload);
+      if (mode === 'signin') {
+        const response = await fetch(`${API_BASE_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+        });
+        const payload = await safeJson(response);
+        if (!response.ok) throw new Error(payload?.error || 'Login failed');
+        onSuccess(payload);
+      } else {
+        const endpoint = role === 'admin' ? '/auth/register/admin' : '/auth/register/doctor';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (adminToken.trim()) headers.Authorization = `Bearer ${adminToken.trim()}`;
+        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ name: name.trim(), email: email.trim().toLowerCase(), password }),
+        });
+        const payload = await safeJson(response);
+        if (!response.ok) throw new Error(payload?.error || 'Account creation failed');
+        if (payload?.token && payload?.user) {
+          onSuccess(payload);
+          return;
+        }
+        setPassword('');
+        onInfo(payload?.message || 'Account created. Verify your email, then sign in.');
+        setMode('signin');
+      }
     } catch (error) {
-      onError(error instanceof Error ? error.message : 'Login failed');
+      onError(error instanceof Error ? error.message : 'Request failed');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <form className="card authCard" onSubmit={submit}>
-      <h2>Doctor/Admin Login</h2>
-      <p>Sign in with your verified hospital account.</p>
-      <label>
-        Email
-        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
-      </label>
-      <label>
-        Password
-        <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
-      </label>
-      <button className="primaryBtn" type="submit" disabled={loading}>{loading ? 'Signing in...' : 'Sign in'}</button>
+    <form className="card authPanel" onSubmit={submit}>
+      <div className="authHeader">
+        <div>
+          <p className="authOverline">Secure staff access</p>
+          <h2>{mode === 'signin' ? 'Doctor/Admin Login' : 'Create Staff Account'}</h2>
+          <p className="muted">
+            {mode === 'signin'
+              ? 'Sign in with your clinic account to reach the dashboard.'
+              : 'Invite doctors or admins with verified clinic credentials.'}
+          </p>
+        </div>
+        <div className="tabRow">
+          <button
+            type="button"
+            className={`tabBtn ${mode === 'signin' ? 'active' : ''}`}
+            onClick={() => {
+              setMode('signin');
+              setInviteMode(false);
+            }}
+          >
+            Sign in
+          </button>
+          {inviteMode && (
+            <button
+              type="button"
+              className={`tabBtn ${mode === 'signup' ? 'active' : ''}`}
+              onClick={() => setMode('signup')}
+            >
+              Create
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="formStack">
+        {mode === 'signup' && (
+          <label>
+            Full name
+            <input value={name} onChange={(e) => setName(e.target.value)} type="text" required={mode === 'signup'} />
+          </label>
+        )}
+        <label>
+          Work email
+          <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+        </label>
+        <label>
+          Password
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
+        </label>
+        {mode === 'signup' && (
+          <label>
+            Role
+            <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
+              <option value="doctor">Doctor</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+        )}
+        {mode === 'signup' && (
+          <label>
+            Admin invite token
+            <input
+              value={adminToken}
+              onChange={(e) => setAdminToken(e.target.value)}
+              type="password"
+              placeholder="Provided by clinic admin"
+              required={mode === 'signup'}
+            />
+          </label>
+        )}
+      </div>
+      {mode === 'signin' ? (
+        <div className="inviteRow">
+          <p className="formHint">New staff accounts are invite-only.</p>
+          <button
+            type="button"
+            className="linkBtn"
+            onClick={() => {
+              setInviteMode(true);
+              setMode('signup');
+            }}
+          >
+            Have an invite token?
+          </button>
+        </div>
+      ) : (
+        <p className="formHint">Doctor and admin accounts require clinic approval before use.</p>
+      )}
+      <button className="primaryBtn" type="submit" disabled={loading}>
+        {loading ? 'Processing...' : mode === 'signin' ? 'Sign in' : 'Create account'}
+      </button>
     </form>
   );
 }

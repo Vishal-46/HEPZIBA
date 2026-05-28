@@ -1,7 +1,7 @@
 :root {
-  font-family: Manrope, "Segoe UI", sans-serif;
-  color: #2F3441;
-  background: #F7F5F2;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #1C242B;
+  background: #F2F4F7;
 }
 
 * {
@@ -10,5 +10,5 @@
 
 body {
   margin: 0;
-  background: #F7F5F2;
+  background: #F2F4F7;
 }
