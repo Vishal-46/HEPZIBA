@@ -53,7 +53,7 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
 
   const [googleRequest, googleResponse, googlePromptAsync] = Google.useAuthRequest({
     androidClientId: googleAndroidClientId,
-    expoClientId: googleExpoClientId,
+    clientId: googleExpoClientId, // Changed from expoClientId
     webClientId: googleWebClientId,
     scopes: ['openid', 'profile', 'email'],
     responseType: AuthSession.ResponseType.IdToken,

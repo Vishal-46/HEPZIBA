@@ -264,12 +264,17 @@ function DoctorPanel({ token }: { token: string }) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [status, setStatus] = useState('confirmed');
   const [notes, setNotes] = useState('');
+  const [medicines, setMedicines] = useState<{ name: string; m: boolean; a: boolean; e: boolean; n: boolean; bf: boolean; af: boolean }[]>([]);
 
-  useEffect(() => {
-    load();
-  }, []);
+  const addMedicineRow = () => {
+    setMedicines([...medicines, { name: '', m: false, a: false, e: false, n: false, bf: false, af: true }]);
+  };
 
-  const selected = useMemo(() => appointments.find((a) => a.id === selectedId) || null, [appointments, selectedId]);
+  const updateMedicine = (index: number, field: string, value: any) => {
+    const updated = [...medicines];
+    updated[index] = { ...updated[index], [field]: value };
+    setMedicines(updated);
+  };
 
   const load = async () => {
     setError('');
@@ -284,6 +289,12 @@ function DoctorPanel({ token }: { token: string }) {
       setError(err instanceof Error ? err.message : 'Failed to load appointments');
     }
   };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const selected = useMemo(() => appointments.find((a) => a.id === selectedId) || null, [appointments, selectedId]);
 
   const updateAppointment = async () => {
     if (!selectedId) return;
@@ -306,9 +317,19 @@ function DoctorPanel({ token }: { token: string }) {
   };
 
   const createPrescription = async () => {
-    if (!selectedId) return;
+    if (!selectedId || medicines.length === 0) return;
     setError('');
     try {
+      const items = medicines.map(m => ({
+        medicine_name: m.name,
+        dosage_morning: m.m,
+        dosage_afternoon: m.a,
+        dosage_evening: m.e,
+        dosage_night: m.n,
+        before_food: m.bf,
+        after_food: m.af
+      }));
+
       const res = await fetch(`${API_BASE_URL}/prescriptions`, {
         method: 'POST',
         headers: {
@@ -317,19 +338,16 @@ function DoctorPanel({ token }: { token: string }) {
         },
         body: JSON.stringify({
           appointment_id: selectedId,
-          notes: notes || undefined,
-          items: [
-            {
-              medicine_name: 'Sample Medicine',
-              dosage_morning: true,
-              after_food: true,
-            },
-          ],
+          notes,
+          items,
         }),
       });
       const data = await safeJson(res);
       if (!res.ok) throw new Error(data?.error || 'Failed to create prescription');
+      setMedicines([]);
+      setNotes('');
       await load();
+      alert('Prescription added!');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create prescription');
     }
@@ -437,11 +455,29 @@ function DoctorPanel({ token }: { token: string }) {
               </div>
               <label>
                 Notes
-                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={4} />
+                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
               </label>
-              <div className="inlineBtns">
+              
+              <div className="sectionTop" style={{marginTop: '15px'}}>
+                <h4>Medicines</h4>
+                <button className="ghostBtn" onClick={addMedicineRow}>+ Add Medicine</button>
+              </div>
+              
+              {medicines.map((m, i) => (
+                <div key={i} className="formRow" style={{marginBottom: '5px', padding: '5px', background: 'var(--mist-100)', borderRadius: '8px'}}>
+                  <input style={{flex: 2, padding: '5px'}} placeholder="Medicine name" value={m.name} onChange={(e) => updateMedicine(i, 'name', e.target.value)} />
+                  <label style={{flexDirection: 'row', gap: 2}}><input type="checkbox" checked={m.m} onChange={(e) => updateMedicine(i, 'm', e.target.checked)} /> M</label>
+                  <label style={{flexDirection: 'row', gap: 2}}><input type="checkbox" checked={m.a} onChange={(e) => updateMedicine(i, 'a', e.target.checked)} /> A</label>
+                  <label style={{flexDirection: 'row', gap: 2}}><input type="checkbox" checked={m.e} onChange={(e) => updateMedicine(i, 'e', e.target.checked)} /> E</label>
+                  <label style={{flexDirection: 'row', gap: 2}}><input type="checkbox" checked={m.n} onChange={(e) => updateMedicine(i, 'n', e.target.checked)} /> N</label>
+                  <label style={{flexDirection: 'row', gap: 2}}><input type="checkbox" checked={m.bf} onChange={(e) => updateMedicine(i, 'bf', e.target.checked)} /> BF</label>
+                  <label style={{flexDirection: 'row', gap: 2}}><input type="checkbox" checked={m.af} onChange={(e) => updateMedicine(i, 'af', e.target.checked)} /> AF</label>
+                </div>
+              ))}
+
+              <div className="inlineBtns" style={{marginTop: '20px'}}>
                 <button className="primaryBtn" onClick={updateAppointment}>Update Status</button>
-                <button className="ghostBtn" onClick={createPrescription}>Add Prescription</button>
+                <button className="ghostBtn" onClick={createPrescription} disabled={medicines.length === 0}>Save Prescription</button>
               </div>
             </>
           ) : (
@@ -517,6 +553,20 @@ function AdminPanel({ token }: { token: string }) {
     }
   };
 
+  const deleteUser = async (id: number) => {
+    if (!confirm('Are you sure you want to deactivate this user?')) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/admin/users/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Failed to delete user');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete');
+    }
+  };
+
   return (
     <div className="stack">
       <div className="sectionTop">
@@ -529,23 +579,29 @@ function AdminPanel({ token }: { token: string }) {
         <section className="card">
           <h3>Users</h3>
           <p>Total: {users.length}</p>
-          {users.slice(0, 6).map((u) => (
-            <div key={u.id} className="miniRow">{u.name} - {u.role}</div>
+          {users.map((u) => (
+            <div key={u.id} className="miniRow">
+              <span>{u.name} ({u.role})</span>
+              <button className="ghostBtn" onClick={() => deleteUser(u.id)}>Delete</button>
+            </div>
           ))}
         </section>
 
         <section className="card">
           <h3>Appointments</h3>
           <p>Total: {appointments.length}</p>
-          {appointments.slice(0, 6).map((a) => (
+          {appointments.slice(0, 10).map((a) => (
             <div key={a.id} className="miniRow">#{a.id} {a.patient_name || ''} - {a.status}</div>
           ))}
         </section>
 
         <section className="card">
           <h3>Inventory</h3>
-          {inventory.slice(0, 6).map((i) => (
-            <div key={i.id} className="miniRow">{i.name} ({i.stock})</div>
+          {inventory.map((i) => (
+            <div key={i.id} className="miniRow">
+              {i.name} - Stock: {i.stock} {i.unit}
+              {i.stock <= i.reorder_level && <span className="pill status cancelled">Low Stock</span>}
+            </div>
           ))}
         </section>
       </div>
