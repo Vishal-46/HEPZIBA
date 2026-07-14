@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { TouchableOpacity } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import {
-  ActivityIndicator,
-  Modal,
-  Platform,
-  SafeAreaView,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
+  Button,
+  Card,
+  Chip,
+  IconButton,
+  Surface,
   Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+  TextInput,
+  TouchableRipple,
+} from 'react-native-paper';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { API_BASE_URL } from '../config/api';
 import FormField from '../components/FormField';
@@ -80,10 +80,46 @@ const BEFORE_VISIT = [
   'Arrive a little early for smooth check-in.',
 ];
 
-export default function PatientHomeScreen({ token, user, onLogout }: Props) {
-  const topInset = Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0;
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createStackNavigator } from '@react-navigation/stack';
+import { useNavigation } from '@react-navigation/native';
+import PrescriptionDetailScreen from './PrescriptionDetailScreen';
+import InvoiceDetailScreen from './InvoiceDetailScreen';
 
-  const [tab, setTab] = useState<TabKey>('home');
+const Stack = createStackNavigator();
+const TabNav = createBottomTabNavigator();
+
+export default function PatientHomeScreen(props: Props) {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="Tabs">
+        {(screenProps) => (
+          <TabNav.Navigator
+            screenOptions={({ route }) => ({
+              tabBarIcon: ({ color, size }) => {
+                let iconName = "home";
+                if (route.name === "HomeTab") iconName = "home";
+                return <IconButton icon={iconName} iconColor={color} size={size} />;
+              },
+              tabBarActiveTintColor: COLOR.primary,
+              tabBarInactiveTintColor: COLOR.accent,
+              headerShown: false,
+            })}
+          >
+            <TabNav.Screen name="HomeTab" children={() => <PatientHomeScreenContent {...props} />} />
+          </TabNav.Navigator>
+        )}
+      </Stack.Screen>
+      <Stack.Screen name="PrescriptionDetail" component={PrescriptionDetailScreen} options={{ title: 'Prescription', headerShown: true }} />
+      <Stack.Screen name="InvoiceDetail" component={InvoiceDetailScreen} options={{ title: 'Invoice', headerShown: true }} />
+    </Stack.Navigator>
+  );
+}
+
+function PatientHomeScreenContent({ token, user, onLogout }: Props) {
+  const navigation = useNavigation<any>();
+  const topInset = Platform.OS === "android" ? (StatusBar.currentHeight || 0) : 0;
+  const [tab, setTab] = useState<TabKey>("home");
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [profile, setProfile] = useState<PatientProfile | null>(null);
@@ -263,15 +299,13 @@ export default function PatientHomeScreen({ token, user, onLogout }: Props) {
 
   return (
     <SafeAreaView style={s.container}>
-      <View style={[s.headerRow, { paddingTop: topInset + SPACING.s }]}>
+      <Surface style={[s.headerRow, { paddingTop: topInset + SPACING.s }]}>
         <View style={s.headerTextWrap}>
           <Text style={s.heading}>Hello, {profile?.name || user.name}</Text>
           <Text style={s.subHeading}>{profile?.patient_code || 'Patient dashboard'}</Text>
         </View>
-        <TouchableOpacity style={s.logoutBtn} onPress={onLogout} activeOpacity={0.8}>
-          <Text style={s.logoutText}>Log out</Text>
-        </TouchableOpacity>
-      </View>
+        <Button mode="contained" onPress={onLogout} style={s.logoutBtn} labelStyle={s.logoutText}>Log out</Button>
+      </Surface>
 
       {!!infoText && <Text style={s.infoText}>{infoText}</Text>}
       {!!errorText && <Text style={s.errorText}>{errorText}</Text>}
@@ -281,146 +315,150 @@ export default function PatientHomeScreen({ token, user, onLogout }: Props) {
 
         {tab === 'home' && (
           <>
-          <View style={s.card}>
-            <Text style={s.cardLabel}>Next Appointment</Text>
-            {nextAppointment ? (
-              <>
-                  <Text style={s.cardTitle}>{formatDate(nextAppointment)}</Text>
-                  <Text style={s.cardMeta}>Doctor: {nextAppointment.doctor_name || 'Assigned doctor'}</Text>
-                  <Text style={s.cardMeta}>Token: #{nextAppointment.token_number || '-'}</Text>
-                  <Text style={s.cardMeta}>Status: {nextAppointment.status}</Text>
-                </>
-              ) : (
-                <Text style={s.cardMeta}>No upcoming appointments.</Text>
-              )}
-            </View>
+            <Card style={s.card}>
+              <Card.Content>
+                <Text style={s.cardLabel}>Next Appointment</Text>
+                {nextAppointment ? (
+                  <>
+                    <Text style={s.cardTitle}>{formatDate(nextAppointment)}</Text>
+                    <Text style={s.cardMeta}>Doctor: {nextAppointment.doctor_name || 'Assigned doctor'}</Text>
+                    <Text style={s.cardMeta}>Token: #{nextAppointment.token_number || '-'}</Text>
+                    <Text style={s.cardMeta}>Status: {nextAppointment.status}</Text>
+                  </>
+                ) : (
+                  <Text style={s.cardMeta}>No upcoming appointments.</Text>
+                )}
+              </Card.Content>
+            </Card>
             <View style={s.quickActions}>
-              <TouchableOpacity style={[s.primaryBtn, s.fullWidthButton]} onPress={() => setShowBookModal(true)} activeOpacity={0.85}>
-                <Text style={s.primaryBtnText}>Book Appointment</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[s.secondaryBtn, s.fullWidthButton]} onPress={() => setTab('records')} activeOpacity={0.85}>
-                <Text style={s.secondaryBtnText}>View Records</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[s.secondaryBtn, s.fullWidthButton]} onPress={() => setTab('clinic')} activeOpacity={0.85}>
-                <Text style={s.secondaryBtnText}>Clinic Details</Text>
-              </TouchableOpacity>
+              <Button mode="contained" onPress={() => setShowBookModal(true)} style={[s.primaryBtn, s.fullWidthButton]} labelStyle={s.primaryBtnText}>Book Appointment</Button>
+              <Button mode="outlined" onPress={() => setTab('records')} style={[s.secondaryBtn, s.fullWidthButton]} labelStyle={s.secondaryBtnText}>View Records</Button>
+              <Button mode="outlined" onPress={() => setTab('clinic')} style={[s.secondaryBtn, s.fullWidthButton]} labelStyle={s.secondaryBtnText}>Clinic Details</Button>
             </View>
           </>
         )}
 
+
         {tab === 'book' && (
-          <View style={s.card}>
-            <Text style={s.cardTitle}>Choose Doctor</Text>
-            {doctors.length ? doctors.map((doctor) => (
-              <TouchableOpacity
-                key={doctor.doctor_id}
-                onPress={() => setSelectedDoctorId(doctor.doctor_id)}
-                style={[s.doctorChip, selectedDoctorId === doctor.doctor_id && s.doctorChipActive]}
-                activeOpacity={0.8}
-              >
-                <Text style={s.doctorChipTitle}>{doctor.name}</Text>
-                <Text style={s.doctorChipMeta}>{doctor.specialty || 'General consultation'}</Text>
-              </TouchableOpacity>
-            )) : <Text style={s.cardMeta}>No doctors listed.</Text>}
-
-            <View style={s.datetimeRow}>
-              <TouchableOpacity style={[s.secondaryBtn, s.flexButton]} onPress={() => setShowDatePicker(true)}>
-                <Text style={s.secondaryBtnText}>Pick Date</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[s.secondaryBtn, s.flexButton]} onPress={() => setShowTimePicker(true)}>
-                <Text style={s.secondaryBtnText}>Pick Time</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={s.cardMeta}>Selected: {appointmentDate.toLocaleString()}</Text>
-
-            <FormField label="Reason" value={reasonInput} onChangeText={setReasonInput} />
-            <FormField label="Symptoms" value={symptomsInput} onChangeText={setSymptomsInput} multiline />
-            <View style={s.priorityRow}>
-              {PRIORITY_OPTIONS.map((item) => (
-                <TouchableOpacity
-                  key={item}
-                  onPress={() => setPriorityInput(item)}
-                  style={[s.priorityChip, priorityInput === item && s.priorityChipActive]}
-                  activeOpacity={0.8}
+          <Card style={s.card}>
+            <Card.Content>
+              <Text style={s.cardTitle}>Choose Doctor</Text>
+              {doctors.length ? doctors.map((doctor) => (
+                <TouchableRipple
+                  key={doctor.doctor_id}
+                  onPress={() => setSelectedDoctorId(doctor.doctor_id)}
+                  style={[s.doctorChip, selectedDoctorId === doctor.doctor_id && s.doctorChipActive]}
                 >
-                  <Text style={[s.priorityChipText, priorityInput === item && s.priorityChipTextActive]}>
+                  <View style={{padding: SPACING.m}}>
+                    <Text style={s.doctorChipTitle}>{doctor.name}</Text>
+                    <Text style={s.doctorChipMeta}>{doctor.specialty || 'General consultation'}</Text>
+                  </View>
+                </TouchableRipple>
+              )) : <Text style={s.cardMeta}>No doctors listed.</Text>}
+
+              <View style={s.datetimeRow}>
+                <Button mode="outlined" style={s.flexButton} onPress={() => setShowDatePicker(true)}>Pick Date</Button>
+                <Button mode="outlined" style={s.flexButton} onPress={() => setShowTimePicker(true)}>Pick Time</Button>
+              </View>
+              <Text style={s.cardMeta}>Selected: {appointmentDate.toLocaleString()}</Text>
+
+              <FormField label="Reason" value={reasonInput} onChangeText={setReasonInput} />
+              <FormField label="Symptoms" value={symptomsInput} onChangeText={setSymptomsInput} multiline />
+              <View style={s.priorityRow}>
+                {PRIORITY_OPTIONS.map((item) => (
+                  <Chip
+                    key={item}
+                    selected={priorityInput === item}
+                    onPress={() => setPriorityInput(item)}
+                    style={{marginRight: SPACING.s}}
+                  >
                     {item.toUpperCase()}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <TouchableOpacity style={s.primaryBtn} onPress={submitBooking} activeOpacity={0.85}>
-              <Text style={s.primaryBtnText}>Confirm Booking</Text>
-            </TouchableOpacity>
-          </View>
+                  </Chip>
+                ))}
+              </View>
+              <Button mode="contained" onPress={submitBooking} style={s.primaryBtn} labelStyle={s.primaryBtnText}>Confirm Booking</Button>
+            </Card.Content>
+          </Card>
         )}
 
         {tab === 'records' && (
           <>
             <SectionCard title="Appointments">
               {appointments.length ? appointments.map((app) => (
-                <View key={app.id} style={s.rowItem}>
-                  <Text style={s.rowTitle}>{formatDate(app)}</Text>
-                  <Text style={s.rowMeta}>Doctor: {app.doctor_name || '-'}</Text>
-                  <Text style={s.rowMeta}>Token: #{app.token_number || '-'}</Text>
-                  <Text style={s.rowMeta}>Status: {app.status}</Text>
-                </View>
+                <Card key={app.id} style={{marginBottom: SPACING.s}}>
+                  <Card.Content>
+                    <Text style={s.rowTitle}>{formatDate(app)}</Text>
+                    <Text style={s.rowMeta}>Doctor: {app.doctor_name || '-'}</Text>
+                    <Text style={s.rowMeta}>Token: #{app.token_number || '-'}</Text>
+                    <Text style={s.rowMeta}>Status: {app.status}</Text>
+                  </Card.Content>
+                </Card>
               )) : <Text style={s.rowMeta}>No appointments yet.</Text>}
             </SectionCard>
 
             <SectionCard title="Prescriptions">
               {prescriptions.length ? prescriptions.map((p) => (
-                <View key={p.id} style={s.rowItem}>
-                  <Text style={s.rowTitle}>{p.doctor_name || 'Doctor'}</Text>
-                  <Text style={s.rowMeta}>{p.prescribed_on ? new Date(p.prescribed_on).toLocaleString() : ''}</Text>
-                  <Text style={s.rowMeta}>{p.items.map((i) => i.medicine_name).join(', ') || 'No items'}</Text>
-                </View>
+                <TouchableOpacity key={p.id} onPress={() => navigation.navigate('PrescriptionDetail', { prescription: p })}>
+                  <Card style={{marginBottom: SPACING.s}}>
+                    <Card.Content>
+                      <Text style={s.rowTitle}>{p.doctor_name || 'Doctor'}</Text>
+                      <Text style={s.rowMeta}>{p.prescribed_on ? new Date(p.prescribed_on).toLocaleString() : ''}</Text>
+                      <Text style={s.rowMeta}>{p.items.map((i) => i.medicine_name).join(', ') || 'No items'}</Text>
+                    </Card.Content>
+                  </Card>
+                </TouchableOpacity>
               )) : <Text style={s.rowMeta}>No prescriptions yet.</Text>}
             </SectionCard>
 
             <SectionCard title="Invoices">
               {invoices.length ? invoices.map((invoice) => (
-                <View key={invoice.id} style={s.rowItem}>
-                  <Text style={s.rowTitle}>Invoice #{invoice.id}</Text>
-                  <Text style={s.rowMeta}>{invoice.invoice_date ? new Date(invoice.invoice_date).toLocaleDateString() : ''}</Text>
-                  <Text style={s.rowMeta}>Amount: Rs {Number(invoice.total_amount || 0).toFixed(2)}</Text>
-                  <Text style={s.rowMeta}>Status: {invoice.status || 'unpaid'}</Text>
-                </View>
+                <TouchableOpacity key={invoice.id} onPress={() => navigation.navigate('InvoiceDetail', { invoice: invoice })}>
+                  <Card style={{marginBottom: SPACING.s}}>
+                    <Card.Content>
+                      <Text style={s.rowTitle}>Invoice #{invoice.id}</Text>
+                      <Text style={s.rowMeta}>{invoice.invoice_date ? new Date(invoice.invoice_date).toLocaleDateString() : ''}</Text>
+                      <Text style={s.rowMeta}>Amount: Rs {Number(invoice.total_amount || 0).toFixed(2)}</Text>
+                      <Text style={s.rowMeta}>Status: {invoice.status || 'unpaid'}</Text>
+                    </Card.Content>
+                  </Card>
+                </TouchableOpacity>
               )) : <Text style={s.rowMeta}>No invoices yet.</Text>}
             </SectionCard>
           </>
         )}
 
         {tab === 'profile' && (
-          <View style={s.card}>
-            <Text style={s.cardTitle}>Patient Details</Text>
-            <FormField label="Name" value={profileDraft.name} onChangeText={(v) => updateDraft(setProfileDraft, 'name', v)} />
-            <FormField label="Email" value={profileDraft.email} onChangeText={(v) => updateDraft(setProfileDraft, 'email', v)} keyboardType="email-address" />
-            <FormField label="Age" value={profileDraft.age} onChangeText={(v) => updateDraft(setProfileDraft, 'age', v)} keyboardType="numeric" />
-            <FormField label="Sex" value={profileDraft.sex} onChangeText={(v) => updateDraft(setProfileDraft, 'sex', v)} />
-            <FormField label="Address" value={profileDraft.address} onChangeText={(v) => updateDraft(setProfileDraft, 'address', v)} />
-            <FormField label="Mobile" value={profileDraft.mobile} onChangeText={(v) => updateDraft(setProfileDraft, 'mobile', v)} keyboardType="phone-pad" />
-            <FormField label="Aadhar" value={profileDraft.aadhar_number} onChangeText={(v) => updateDraft(setProfileDraft, 'aadhar_number', v)} keyboardType="numeric" />
-            <FormField label="Height (cm)" value={profileDraft.height_cm} onChangeText={(v) => updateDraft(setProfileDraft, 'height_cm', v)} keyboardType="numeric" />
-            <FormField label="Weight (kg)" value={profileDraft.weight_kg} onChangeText={(v) => updateDraft(setProfileDraft, 'weight_kg', v)} keyboardType="numeric" />
-            <FormField label="BP" value={profileDraft.bp} onChangeText={(v) => updateDraft(setProfileDraft, 'bp', v)} />
-            <FormField label="SpO2" value={profileDraft.spo2} onChangeText={(v) => updateDraft(setProfileDraft, 'spo2', v)} keyboardType="numeric" />
-            <TouchableOpacity style={s.primaryBtn} onPress={saveProfile} activeOpacity={0.85}>
-              <Text style={s.primaryBtnText}>Save Profile</Text>
-            </TouchableOpacity>
-          </View>
+          <Card style={s.card}>
+            <Card.Content>
+              <Text style={s.cardTitle}>Patient Details</Text>
+              <FormField label="Name" value={profileDraft.name} onChangeText={(v) => updateDraft(setProfileDraft, 'name', v)} />
+              <FormField label="Email" value={profileDraft.email} onChangeText={(v) => updateDraft(setProfileDraft, 'email', v)} keyboardType="email-address" />
+              <FormField label="Age" value={profileDraft.age} onChangeText={(v) => updateDraft(setProfileDraft, 'age', v)} keyboardType="numeric" />
+              <FormField label="Sex" value={profileDraft.sex} onChangeText={(v) => updateDraft(setProfileDraft, 'sex', v)} />
+              <FormField label="Address" value={profileDraft.address} onChangeText={(v) => updateDraft(setProfileDraft, 'address', v)} />
+              <FormField label="Mobile" value={profileDraft.mobile} onChangeText={(v) => updateDraft(setProfileDraft, 'mobile', v)} keyboardType="phone-pad" />
+              <FormField label="Aadhar" value={profileDraft.aadhar_number} onChangeText={(v) => updateDraft(setProfileDraft, 'aadhar_number', v)} keyboardType="numeric" />
+              <FormField label="Height (cm)" value={profileDraft.height_cm} onChangeText={(v) => updateDraft(setProfileDraft, 'height_cm', v)} keyboardType="numeric" />
+              <FormField label="Weight (kg)" value={profileDraft.weight_kg} onChangeText={(v) => updateDraft(setProfileDraft, 'weight_kg', v)} keyboardType="numeric" />
+              <FormField label="BP" value={profileDraft.bp} onChangeText={(v) => updateDraft(setProfileDraft, 'bp', v)} />
+              <FormField label="SpO2" value={profileDraft.spo2} onChangeText={(v) => updateDraft(setProfileDraft, 'spo2', v)} keyboardType="numeric" />
+              <Button mode="contained" onPress={saveProfile} style={s.primaryBtn} labelStyle={s.primaryBtnText}>Save Profile</Button>
+            </Card.Content>
+          </Card>
         )}
 
         {tab === 'clinic' && (
           <>
-            <View style={s.card}>
-              <Text style={s.cardTitle}>About the Clinic</Text>
-              <Text style={s.rowTitle}>{CLINIC_DETAILS.name}</Text>
-              <Text style={s.rowMeta}>{CLINIC_DETAILS.specialty}</Text>
-              <Text style={s.rowMeta}>Doctor: {CLINIC_DETAILS.doctor}</Text>
-              <Text style={s.rowMeta}>Address: {CLINIC_DETAILS.address}</Text>
-              <Text style={s.rowMeta}>Mobile: {CLINIC_DETAILS.mobile}</Text>
-            </View>
+            <Card style={s.card}>
+              <Card.Content>
+                <Text style={s.cardTitle}>About the Clinic</Text>
+                <Text style={s.rowTitle}>{CLINIC_DETAILS.name}</Text>
+                <Text style={s.rowMeta}>{CLINIC_DETAILS.specialty}</Text>
+                <Text style={s.rowMeta}>Doctor: {CLINIC_DETAILS.doctor}</Text>
+                <Text style={s.rowMeta}>Address: {CLINIC_DETAILS.address}</Text>
+                <Text style={s.rowMeta}>Mobile: {CLINIC_DETAILS.mobile}</Text>
+              </Card.Content>
+            </Card>
 
             <SectionCard title="Why Patients Choose Us">
               <InfoList items={CLINIC_HIGHLIGHTS} />
@@ -447,42 +485,25 @@ export default function PatientHomeScreen({ token, user, onLogout }: Props) {
 
       <Modal visible={showBookModal} transparent animationType="slide">
         <View style={s.modalWrap}>
-          <View style={s.modalCard}>
-            <Text style={s.cardTitle}>Book Appointment</Text>
-            <Text style={s.cardMeta}>Open full booking to choose doctor, date, and notes.</Text>
-            <TouchableOpacity style={s.primaryBtn} onPress={() => { setTab('book'); setShowBookModal(false); }}>
-              <Text style={s.primaryBtnText}>Open Booking</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={s.secondaryBtn} onPress={() => setShowBookModal(false)}>
-              <Text style={s.secondaryBtnText}>Close</Text>
-            </TouchableOpacity>
-          </View>
+          <Card style={s.modalCard}>
+            <Card.Content>
+              <Text style={s.cardTitle}>Book Appointment</Text>
+              <Text style={s.cardMeta}>Open full booking to choose doctor, date, and notes.</Text>
+              <Button mode="contained" onPress={() => { setTab('book'); setShowBookModal(false); }} style={s.primaryBtn} labelStyle={s.primaryBtnText}>Open Booking</Button>
+              <Button mode="outlined" onPress={() => setShowBookModal(false)} style={s.secondaryBtn} labelStyle={s.secondaryBtnText}>Close</Button>
+            </Card.Content>
+          </Card>
         </View>
       </Modal>
 
-      {showDatePicker && (
-        <DateTimePicker
-          mode="date"
-          value={appointmentDate}
-          minimumDate={new Date()}
-          onChange={(_, date) => {
-            setShowDatePicker(Platform.OS === 'ios');
-            if (date) setAppointmentDate(date);
-          }}
-        />
-      )}
-      {showTimePicker && (
-        <DateTimePicker
-          mode="time"
-          value={appointmentDate}
-          onChange={(_, date) => {
-            setShowTimePicker(Platform.OS === 'ios');
-            if (date) {
-              const merged = new Date(appointmentDate);
-              merged.setHours(date.getHours());
-              merged.setMinutes(date.getMinutes());
-              setAppointmentDate(merged);
-            }
+function Tab({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <TouchableRipple style={s.tab} onPress={onPress}>
+      <Text style={[s.tabText, active && s.tabActive]}>{label}</Text>
+    </TouchableRipple>
+  );
+}
+
           }}
         />
       )}
@@ -496,10 +517,12 @@ function updateDraft(setter: React.Dispatch<React.SetStateAction<Record<string, 
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <View style={s.card}>
-      <Text style={s.cardTitle}>{title}</Text>
-      {children}
-    </View>
+    <Card style={s.card}>
+      <Card.Content>
+        <Text style={s.cardTitle}>{title}</Text>
+        {children}
+      </Card.Content>
+    </Card>
   );
 }
 
@@ -515,9 +538,9 @@ function InfoList({ items }: { items: string[] }) {
 
 function Tab({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
-    <TouchableOpacity style={s.tab} onPress={onPress} activeOpacity={0.8}>
+    <TouchableRipple style={s.tab} onPress={onPress}>
       <Text style={[s.tabText, active && s.tabActive]}>{label}</Text>
-    </TouchableOpacity>
+    </TouchableRipple>
   );
 }
 

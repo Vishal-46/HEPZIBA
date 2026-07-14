@@ -11,13 +11,20 @@
   "dependencies": {
     "@expo-google-fonts/manrope": "^0.4.2",
     "@react-native-community/datetimepicker": "8.4.4",
+    "@react-navigation/bottom-tabs": "^7.18.8",
+    "@react-navigation/native": "^7.3.8",
+    "@react-navigation/stack": "^7.10.11",
     "expo": "~54.0.33",
     "expo-auth-session": "^5.0.0",
     "expo-font": "^55.0.8",
     "expo-status-bar": "~3.0.9",
     "expo-web-browser": "^13.0.3",
     "react": "19.1.0",
-    "react-native": "0.81.5"
+    "react-native": "0.81.5",
+    "react-native-paper": "^5.15.3",
+    "react-native-safe-area-context": "^5.8.0",
+    "react-native-screens": "^4.26.0",
+    "react-native-vector-icons": "^10.3.0"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
