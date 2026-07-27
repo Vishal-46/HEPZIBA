@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { TouchableOpacity } from 'react-native';
+import { TouchableOpacity, SafeAreaView, View, ScrollView, Modal, Platform, StatusBar, StyleSheet, ActivityIndicator } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import {
   Button,
@@ -8,13 +8,16 @@ import {
   IconButton,
   Surface,
   Text,
-  TextInput,
   TouchableRipple,
 } from 'react-native-paper';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { API_BASE_URL } from '../config/api';
 import FormField from '../components/FormField';
 import { COLOR, FONT, RADIUS, SHADOW, SPACING } from '../../theme';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createStackNavigator } from '@react-navigation/stack';
+import PrescriptionDetailScreen from './PrescriptionDetailScreen';
+import InvoiceDetailScreen from './InvoiceDetailScreen';
 
 type User = { id: number; name: string; email: string; role: 'patient' | 'doctor' | 'admin' };
 
@@ -79,12 +82,6 @@ const BEFORE_VISIT = [
   'Keep your phone number active for updates.',
   'Arrive a little early for smooth check-in.',
 ];
-
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { createStackNavigator } from '@react-navigation/stack';
-import { useNavigation } from '@react-navigation/native';
-import PrescriptionDetailScreen from './PrescriptionDetailScreen';
-import InvoiceDetailScreen from './InvoiceDetailScreen';
 
 const Stack = createStackNavigator();
 const TabNav = createBottomTabNavigator();
@@ -495,18 +492,6 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
           </Card>
         </View>
       </Modal>
-
-function Tab({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
-  return (
-    <TouchableRipple style={s.tab} onPress={onPress}>
-      <Text style={[s.tabText, active && s.tabActive]}>{label}</Text>
-    </TouchableRipple>
-  );
-}
-
-          }}
-        />
-      )}
     </SafeAreaView>
   );
 }
@@ -682,3 +667,4 @@ const s = StyleSheet.create({
   modalWrap: { flex: 1, backgroundColor: 'rgba(47,52,65,0.28)', justifyContent: 'flex-end', padding: SPACING.l },
   modalCard: { backgroundColor: COLOR.surface, borderRadius: RADIUS.lg, padding: SPACING.l, ...SHADOW.card },
 });
+
