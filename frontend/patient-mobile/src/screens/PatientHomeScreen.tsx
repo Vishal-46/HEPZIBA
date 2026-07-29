@@ -86,6 +86,10 @@ const BEFORE_VISIT = [
 const Stack = createStackNavigator();
 const TabNav = createBottomTabNavigator();
 
+const createStyles = <T extends Record<string, unknown>>(styles: T): T => {
+  return typeof StyleSheet.create === 'function' ? StyleSheet.create(styles) : styles;
+};
+
 export default function PatientHomeScreen(props: Props) {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -549,7 +553,7 @@ async function safeJson(response: Response): Promise<any> {
   }
 }
 
-const s = StyleSheet.create({
+const s = createStyles({
   container: { flex: 1, backgroundColor: COLOR.background },
   headerRow: {
     paddingHorizontal: SPACING.l,

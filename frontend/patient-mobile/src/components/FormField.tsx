@@ -35,7 +35,11 @@ export default function FormField({
   );
 }
 
-const s = StyleSheet.create({
+const createStyles = <T extends Record<string, unknown>>(styles: T): T => {
+  return typeof StyleSheet.create === 'function' ? StyleSheet.create(styles) : styles;
+};
+
+const s = createStyles({
   wrap: {
     marginBottom: SPACING.s,
   },
