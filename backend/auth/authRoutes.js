@@ -2,8 +2,15 @@ const express = require('express');
 const router = express.Router();
 const ctrl = require('./authController');
 
+const { body } = require('express-validator');
+const validate = require('../middleware/validate');
+
 // Registration and verification
-router.post('/register/patient', ctrl.registerPatient);
+router.post('/register/patient', [
+  body('email').isEmail().normalizeEmail(),
+  body('password').isLength({ min: 8 }),
+  body('name').notEmpty().trim()
+], validate, ctrl.registerPatient);
 router.post('/verify-email', ctrl.verifyEmail);
 
 // Login

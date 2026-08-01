@@ -65,10 +65,10 @@ exports.registerPatient = async (req, res) => {
     const code = generateCode();
 
     const inserted = await pool.query(`
-      INSERT INTO users (name, email, password, role, email_verified, verification_code, verification_code_expires_at)
-      VALUES ($1,$2,$3,'patient',FALSE,$4,NOW() + INTERVAL '15 minutes')
+      INSERT INTO users (name, email, password, role, email_verified)
+      VALUES ($1,$2,$3,'patient',TRUE)
       RETURNING id
-    `, [name, normalizedEmail, hash, code]);
+    `, [name, normalizedEmail, hash]);
 
     const userId = inserted.rows[0].id;
     const patientCode = generatePatientCode(userId);
@@ -80,15 +80,15 @@ exports.registerPatient = async (req, res) => {
       [userId, patientCode]
     );
 
-    // Send code via email
-    await sendMail({
-      to: normalizedEmail,
-      from: process.env.FROM_EMAIL,
-      subject: `[Hepziba] Verify your email`,
-      text: `Your verification code is: ${code}\nValid for 15 minutes.`
-    });
+    // Send code via email (DISABLED)
+    // await sendMail({
+    //   to: normalizedEmail,
+    //   from: process.env.FROM_EMAIL,
+    //   subject: `[Hepziba] Verify your email`,
+    //   text: `Your verification code is: ${code}\nValid for 15 minutes.`
+    // });
 
-    res.json({ message: 'Registration successful, check your email for code.', patient_code: patientCode });
+    res.json({ message: 'Registration successful, skipping email verification.', patient_code: patientCode });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Registration failed.' });

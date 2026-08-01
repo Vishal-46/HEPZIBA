@@ -136,3 +136,4 @@ If you need examples (request/response bodies) or want to discuss edge cases, ta
 
 ---
 _Last updated: May 2026_
+
