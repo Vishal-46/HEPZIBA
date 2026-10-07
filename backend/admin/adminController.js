@@ -1,6 +1,7 @@
 // Admin controller: user and appointment management
 const pool = require('../db');
 
+
 // GET /admin/users?role=...
 exports.listUsers = async (req, res) => {
   const { role } = req.query;
