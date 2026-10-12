@@ -8,12 +8,17 @@ const validate = require('../middleware/validate');
 
 // Patient endpoints
 router.post('/', roleAuth('patient'), [
-    body('doctor_id').isInt(),
-    body('date_time').isISO8601(),
-    body('reason').optional().trim()
+    body('doctor_id').isInt({ min: 1 }).withMessage('doctor_id must be an integer'),
+    body('scheduled_at').optional().isISO8601().withMessage('scheduled_at must be ISO8601'),
+    body('date_time').optional().isISO8601().withMessage('date_time must be ISO8601'),
+    body('reason').optional().trim(),
+    body('notes').optional().trim()
 ], validate, ctrl.createAppointment);
 router.get('/my', roleAuth('patient'), ctrl.getMyAppointments);
 router.get('/catalog/doctors', roleAuth('patient'), ctrl.listDoctorsForPatients);
+// Patient ownership: view / cancel own appointment
+router.get('/:id', roleAuth('patient'), ctrl.getMyAppointmentById);
+router.patch('/:id', roleAuth('patient'), ctrl.cancelMyAppointment);
 // Doctor endpoint
 router.get('/for-me', roleAuth('doctor'), ctrl.getForMe);
 

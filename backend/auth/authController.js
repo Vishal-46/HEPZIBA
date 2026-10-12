@@ -1,12 +1,14 @@
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const https = require('https');
-const { hashPassword, checkPassword, generateCode } = require('../utils/crypto');
+const { hashPassword, checkPassword, generateCode, generateSecureToken } = require('../utils/crypto');
 const { sendMail } = require('../mailer/mailer');
 const { generatePatientCode } = require('../utils/patientCode');
 
-// Helper to sign JWTs
+// Helper to sign JWTs — throws when JWT_SECRET is missing so callers
+// fail closed (500) instead of issuing unsigned/unverifiable tokens.
 function signToken(user) {
+  if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured');
   return jwt.sign(
     { id: user.id, role: user.role, email: user.email },
     process.env.JWT_SECRET, { expiresIn: '4h' }
@@ -57,14 +59,21 @@ exports.registerPatient = async (req, res) => {
 
   const normalizedEmail = String(email).trim().toLowerCase();
 
+  const client = await pool.connect();
   try {
-    const found = await pool.query('SELECT id FROM users WHERE email=$1', [normalizedEmail]);
-    if (found.rows.length) return res.status(400).json({ error: 'Email already in use.' });
+    await client.query('BEGIN');
+    const found = await client.query('SELECT id FROM users WHERE email=$1', [normalizedEmail]);
+    if (found.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Email already in use.' });
+    }
 
     const hash = await hashPassword(password);
-    const code = generateCode();
 
-    const inserted = await pool.query(`
+    // M1: email verification is optional/deferred. Accounts are usable
+    // immediately for both password and OAuth login; email_verified stays
+    // as informational metadata, not a login gate.
+    const inserted = await client.query(`
       INSERT INTO users (name, email, password, role, email_verified)
       VALUES ($1,$2,$3,'patient',TRUE)
       RETURNING id
@@ -73,25 +82,30 @@ exports.registerPatient = async (req, res) => {
     const userId = inserted.rows[0].id;
     const patientCode = generatePatientCode(userId);
 
-    await pool.query(
+    // Plain INSERT: userId is brand-new so no patient row can exist yet.
+    // Avoids ON CONFLICT(user_id) which requires UNIQUE(patients.user_id)
+    // (added by 002 migration; older DBs without it throw 42P10).
+    await client.query(
       `INSERT INTO patients (user_id, patient_code)
-       VALUES ($1, $2)
-       ON CONFLICT (user_id) DO UPDATE SET patient_code = EXCLUDED.patient_code`,
+       VALUES ($1, $2)`,
       [userId, patientCode]
     );
 
-    // Send code via email (DISABLED)
-    // await sendMail({
-    //   to: normalizedEmail,
-    //   from: process.env.FROM_EMAIL,
-    //   subject: `[Hepziba] Verify your email`,
-    //   text: `Your verification code is: ${code}\nValid for 15 minutes.`
-    // });
+    await client.query('COMMIT');
 
-    res.json({ message: 'Registration successful, skipping email verification.', patient_code: patientCode });
+    // Verification email intentionally not sent (verification deferred).
+    // See deprecated verifyEmail handler below.
+
+    res.json({ message: 'Registration successful.', patient_code: patientCode });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    if (e && e.code === '23505') {
+      return res.status(400).json({ error: 'Email already in use.' });
+    }
     console.error(e);
     res.status(500).json({ error: 'Registration failed.' });
+  } finally {
+    client.release();
   }
 };
 
@@ -125,69 +139,63 @@ exports.registerDoctor = async (req, res) => {
   if (!name || !email || !password) return res.status(400).json({ error: 'Missing required field.' });
   const normalizedEmail = String(email).trim().toLowerCase();
 
+  const client = await pool.connect();
   try {
-    const found = await pool.query('SELECT id FROM users WHERE email=$1', [normalizedEmail]);
-    if (found.rows.length) return res.status(400).json({ error: 'Email already in use.' });
+    await client.query('BEGIN');
+    const found = await client.query('SELECT id FROM users WHERE email=$1', [normalizedEmail]);
+    if (found.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Email already in use.' });
+    }
 
     const hash = await hashPassword(password);
     // Doctor is immediately verified
-    const userInsert = await pool.query(`
+    const userInsert = await client.query(`
       INSERT INTO users (name, email, password, role, email_verified)
       VALUES ($1, $2, $3, 'doctor', TRUE)
       RETURNING id
     `, [name, normalizedEmail, hash]);
 
     const userId = userInsert.rows[0].id;
-    const doctorExists = (await pool.query('SELECT 1 FROM doctors WHERE user_id=$1', [userId])).rowCount > 0;
+    const doctorExists = (await client.query('SELECT 1 FROM doctors WHERE user_id=$1', [userId])).rowCount > 0;
     if (doctorExists) {
-      await pool.query(
+      await client.query(
         `UPDATE doctors
          SET specialty=COALESCE($1,specialty), phone=COALESCE($2,phone), bio=COALESCE($3,bio)
          WHERE user_id=$4`,
         [specialty || null, phone || null, bio || null, userId]
       );
     } else {
-      await pool.query(
+      await client.query(
         `INSERT INTO doctors (user_id, specialty, phone, bio)
          VALUES ($1, $2, $3, $4)`,
         [userId, specialty || null, phone || null, bio || null]
       );
     }
 
+    await client.query('COMMIT');
+
     res.json({ message: 'Doctor registration successful.' });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    if (e && e.code === '23505') {
+      return res.status(400).json({ error: 'Email already in use.' });
+    }
     console.error(e);
     res.status(500).json({ error: 'Doctor registration failed.' });
+  } finally {
+    client.release();
   }
 };
 
-// --------- VERIFY EMAIL ----------
+// --------- VERIFY EMAIL (DEPRECATED) ----------
+// Email verification is deferred: registrations mark email_verified=TRUE and
+// no codes are issued, so this path is dead. Kept as a 410 stub so old
+// clients get a clear message instead of a confusing "invalid code" error.
 exports.verifyEmail = async (req, res) => {
-  const { email, code } = req.body;
-  if (!email || !code) return res.status(400).json({ error: 'Missing field.' });
-  const normalizedEmail = String(email).trim().toLowerCase();
-
-  try {
-    const userQ = await pool.query(
-      `SELECT id, verification_code, verification_code_expires_at FROM users WHERE email=$1 AND email_verified=FALSE`,
-      [normalizedEmail]
-    );
-    if (!userQ.rows.length) return res.status(400).json({ error: 'User not found or already verified.' });
-    const user = userQ.rows[0];
-    if (user.verification_code !== code ||
-        new Date(user.verification_code_expires_at) < new Date()) {
-      return res.status(400).json({ error: 'Invalid or expired code.' });
-    }
-    // Mark verified, clear code
-    await pool.query(
-      `UPDATE users SET email_verified=TRUE, verification_code=NULL, verification_code_expires_at=NULL WHERE id=$1`,
-      [user.id]
-    );
-    res.json({ message: 'Email verified, you can now login.' });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Verification failed.' });
-  }
+  return res.status(410).json({
+    error: 'Email verification is no longer required. Your account is active — please log in.',
+  });
 };
 
 // --------- LOGIN ----------
@@ -202,7 +210,9 @@ exports.login = async (req, res) => {
     if (q.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials.' });
     const user = q.rows[0];
     if (!user.active) return res.status(401).json({ error: 'Account deactivated.' });
-    if (!user.email_verified) return res.status(401).json({ error: 'Email not verified.' });
+    // M1: email_verified is optional — do NOT block login on it, so OAuth-
+    // created and legacy-unverified accounts can sign in with a password.
+    if (!user.password) return res.status(401).json({ error: 'Invalid credentials.' });
     const ok = await checkPassword(password, user.password);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials.' });
 
@@ -221,23 +231,38 @@ exports.forgotPassword = async (req, res) => {
   const normalizedEmail = String(email).trim().toLowerCase();
 
   try {
-    const q = await pool.query('SELECT id, email_verified FROM users WHERE email=$1', [normalizedEmail]);
-    if (!q.rows.length) return res.json({ message: 'If the account exists and is verified, you will receive instructions.' });
+    // Generic response either way to avoid account-enumeration.
+    const genericMsg = { message: 'If the account exists, you will receive instructions.' };
+    const q = await pool.query('SELECT id FROM users WHERE email=$1', [normalizedEmail]);
+    if (!q.rows.length) return res.json(genericMsg);
     const user = q.rows[0];
-    if (!user.email_verified) return res.json({ message: 'If the account exists and is verified, you will receive instructions.' });
 
+    // M1: no email_verified gate — any existing account may reset.
+    // Persist the code BEFORE sending mail so a crash between the two
+    // cannot leave an emailed-but-unknown code.
     const code = generateCode();
     await pool.query(
       `UPDATE users SET reset_code=$1, reset_code_expires_at=NOW() + INTERVAL '15 minutes' WHERE id=$2`,
       [code, user.id]
     );
-    await sendMail({
-      to: normalizedEmail,
-      from: process.env.FROM_EMAIL,
-      subject: `[Hepziba] Password Reset`,
-      text: `Your password reset code is: ${code}\nValid for 15 minutes.`
-    });
-    res.json({ message: 'If the account exists and is verified, you will receive instructions.' });
+    try {
+      await sendMail({
+        to: normalizedEmail,
+        from: process.env.FROM_EMAIL,
+        subject: `[Hepziba] Password Reset`,
+        text: `Your password reset code is: ${code}\nValid for 15 minutes.`
+      });
+    } catch (mailErr) {
+      // Compensating rollback: clear the code the user never received so a
+      // stale code cannot linger, then surface a retryable 500.
+      console.error('forgotPassword mailer failure:', mailErr.message);
+      await pool.query(
+        `UPDATE users SET reset_code=NULL, reset_code_expires_at=NULL WHERE id=$1`,
+        [user.id]
+      );
+      return res.status(500).json({ error: 'Could not send reset email, please try again.' });
+    }
+    res.json(genericMsg);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Reset initiation failed.' });
@@ -248,11 +273,13 @@ exports.forgotPassword = async (req, res) => {
 exports.resetPassword = async (req, res) => {
   const { email, code, newPassword } = req.body;
   if (!email || !code || !newPassword) return res.status(400).json({ error: 'Missing field.' });
+  if (String(newPassword).length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters.' });
   const normalizedEmail = String(email).trim().toLowerCase();
 
   try {
+    // M1: no email_verified gate — reset works for any existing account.
     const q = await pool.query(
-      `SELECT id, reset_code, reset_code_expires_at FROM users WHERE email=$1 AND email_verified=TRUE`,
+      `SELECT id, reset_code, reset_code_expires_at FROM users WHERE email=$1`,
       [normalizedEmail]
     );
     if (!q.rows.length) return res.status(400).json({ error: 'Invalid code.' });
@@ -304,8 +331,7 @@ exports.googleLogin = async (req, res) => {
         const patientCode = generatePatientCode(user.id);
         await pool.query(
           `INSERT INTO patients (user_id, patient_code)
-           VALUES ($1, $2)
-           ON CONFLICT (user_id) DO UPDATE SET patient_code = EXCLUDED.patient_code`,
+           VALUES ($1, $2)`,
           [user.id, patientCode]
         );
       }
@@ -315,7 +341,8 @@ exports.googleLogin = async (req, res) => {
     }
 
     const name = String(googlePayload.name || googlePayload.given_name || 'Patient').trim();
-    const tempPassword = `${generateCode(12)}${generateCode(12)}`;
+    // Throwaway secret — never emailed or shown; only to satisfy NOT NULL.
+    const tempPassword = generateSecureToken(24);
     const hash = await hashPassword(tempPassword);
 
     const inserted = await pool.query(
@@ -329,8 +356,7 @@ exports.googleLogin = async (req, res) => {
     const patientCode = generatePatientCode(user.id);
     await pool.query(
       `INSERT INTO patients (user_id, patient_code)
-       VALUES ($1, $2)
-       ON CONFLICT (user_id) DO UPDATE SET patient_code = EXCLUDED.patient_code`,
+       VALUES ($1, $2)`,
       [user.id, patientCode]
     );
 

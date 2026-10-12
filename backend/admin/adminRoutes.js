@@ -8,5 +8,6 @@ router.get('/users/:id', roleAuth('admin'), ctrl.getUser);
 router.put('/users/:id', roleAuth('admin'), ctrl.updateUser);
 router.delete('/users/:id', roleAuth('admin'), ctrl.deleteUser);
 router.get('/appointments', roleAuth('admin'), ctrl.listAppointments);
+router.patch('/appointments/:id', roleAuth('admin'), ctrl.updateAppointmentStatus);
 
 module.exports = router;

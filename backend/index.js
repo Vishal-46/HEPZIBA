@@ -5,7 +5,31 @@ const cors = require('cors')
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors());
+// Low-risk default headers for a JSON API. crossOriginResourcePolicy is
+// disabled so a separately-hosted frontend (allowed via CORS below) can
+// still read API responses; all other helmet defaults stay on.
+app.use(require('helmet')({ crossOriginResourcePolicy: false }));
+
+// Tightened CORS: explicit env allowlist, localhost fallback for dev.
+// CORS_ORIGIN is a comma-separated list, e.g.
+// CORS_ORIGIN=https://app.example.com,https://admin.example.com
+// FRONTEND_URL is also honored when set.
+const corsAllowlist = [
+  ...(process.env.CORS_ORIGIN || '').split(','),
+  process.env.FRONTEND_URL || '',
+].map((s) => s.trim()).filter(Boolean);
+const localhostOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // non-browser clients (curl, health checks)
+    if (corsAllowlist.includes(origin)) return cb(null, true);
+    if (corsAllowlist.length === 0 && localhostOrigin.test(origin)) return cb(null, true);
+    // Deny by omitting CORS headers (browser blocks the response) rather
+    // than erroring, so a disallowed origin never surfaces a 500.
+    return cb(null, false);
+  },
+  credentials: true,
+}));
 
 // DB pool setup
 const pool = new Pool({

@@ -52,6 +52,11 @@ exports.deleteUser = async (req, res) => {
 // GET /admin/appointments
 exports.listAppointments = async (req, res) => {
   try {
+    let limit = Number(req.query.limit ?? 20);
+    let offset = Number(req.query.offset ?? 0);
+    if (!Number.isInteger(limit) || limit < 1) limit = 20;
+    if (limit > 100) limit = 100;
+    if (!Number.isInteger(offset) || offset < 0) offset = 0;
     const q = await pool.query(
       `SELECT a.*, COALESCE(a.scheduled_at, a.date_time) AS scheduled_at_effective,
        pu.name AS patient_name, p.patient_code, p.age, p.sex, p.mobile, p.bp, p.spo2,
@@ -61,10 +66,40 @@ exports.listAppointments = async (req, res) => {
        LEFT JOIN users pu ON pu.id = p.user_id
        LEFT JOIN doctors d ON d.id = a.doctor_id
        LEFT JOIN users du ON du.id = d.user_id
-       ORDER BY COALESCE(a.scheduled_at, a.date_time) DESC`
+       ORDER BY COALESCE(a.scheduled_at, a.date_time) DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
     res.json(q.rows);
   } catch (e) {
     console.error(e); res.status(500).json({ error: 'Failed to list appointments' });
+  }
+};
+// PATCH /admin/appointments/:id - Admin may set any whitelisted status (bypass ownership)
+exports.updateAppointmentStatus = async (req, res) => {
+  const ADMIN_STATUSES = ['pending', 'confirmed', 'done', 'cancelled'];
+  try {
+    const appointmentId = Number(req.params.id);
+    if (!Number.isInteger(appointmentId)) return res.status(400).json({ error: 'Invalid appointment id' });
+    const { status, notes } = req.body || {};
+    let nextStatus = null;
+    if (status !== undefined && status !== null) {
+      nextStatus = String(status).trim();
+      if (!ADMIN_STATUSES.includes(nextStatus)) {
+        return res.status(400).json({ error: `status must be one of ${ADMIN_STATUSES.join('|')}` });
+      }
+    }
+    const cleanNotes = notes !== undefined && notes !== null ? String(notes).trim() || null : null;
+    if (nextStatus === null && notes === undefined) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    const q = await pool.query(
+      'UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3 RETURNING *',
+      [nextStatus, cleanNotes, appointmentId]
+    );
+    if (!q.rows.length) return res.status(404).json({ error: 'Appointment not found' });
+    res.json({ message: 'Appointment updated', appointment: q.rows[0] });
+  } catch (e) {
+    console.error(e); res.status(500).json({ error: 'Failed to update appointment' });
   }
 };

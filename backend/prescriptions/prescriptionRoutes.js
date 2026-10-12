@@ -5,6 +5,6 @@ const roleAuth = require('../middleware/roleAuth');
 
 router.post('/', roleAuth('doctor'), ctrl.createPrescription);
 router.get('/my', roleAuth('patient'), ctrl.getMyPrescriptions);
-router.get('/appointment/:appointmentId', roleAuth(['doctor', 'patient']), ctrl.getByAppointment);
+router.get('/appointment/:appointmentId', roleAuth(['doctor', 'patient', 'admin']), ctrl.getByAppointment);
 
 module.exports = router;

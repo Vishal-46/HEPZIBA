@@ -1,0 +1,13 @@
+-- Seeded initial admin (run once). The /auth/register/admin endpoint
+-- requires an existing admin token, so the FIRST admin must be inserted
+-- directly. Placeholders only — never commit real passwords or hashes.
+--
+-- 1. Generate a bcrypt hash OUT OF BAND for your chosen strong password:
+--      node -e "console.log(require('bcrypt').hashSync('CHOOSE-A-STRONG-PASSWORD', 12))"
+-- 2. Paste the hash into <BCRYPT_HASH> below and run the INSERT once.
+-- 3. Log in via POST /auth/login, then create further admins/doctors via
+--    the admin-only API endpoints.
+--
+-- INSERT INTO users (name, email, password, role, email_verified, active)
+-- VALUES ('Admin', 'admin@example.com', '<BCRYPT_HASH>', 'admin', TRUE, TRUE)
+-- ON CONFLICT (email) DO NOTHING;
