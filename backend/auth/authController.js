@@ -4,7 +4,20 @@ const https = require('https');
 const { hashPassword, checkPassword, generateCode, generateSecureToken } = require('../utils/crypto');
 const { sendMail } = require('../mailer/mailer');
 const { verificationEmail, passwordResetEmail } = require('../mailer/templates');
-const { generatePatientCode } = require('../utils/patientCode');
+const { generateUniquePatientCode } = require('../utils/patientCode');
+
+// True when a 23505 unique violation concerns patients.patient_code.
+// Inspects the constraint/detail when the driver provides them; a bare
+// 23505 with no identifiable constraint is treated as a code collision by
+// callers that insert for a brand-new user (their user_id cannot collide),
+// while the existing-user googleLogin path disambiguates with a SELECT.
+function isPatientCodeConflict(e) {
+  if (!e || e.code !== '23505') return false;
+  const hay = `${e.constraint || ''} ${e.detail || ''} ${e.message || ''}`;
+  if (/patient_code/i.test(hay)) return true;
+  if (/user_id/i.test(hay)) return false;
+  return true;
+}
 
 // Helper to sign JWTs — throws when JWT_SECRET is missing so callers
 // fail closed (500) instead of issuing unsigned/unverifiable tokens.
@@ -41,7 +54,18 @@ async function verifyGoogleIdToken(idToken) {
     throw new Error(payload?.error_description || 'Invalid Google token');
   }
 
-  if (process.env.GOOGLE_CLIENT_ID && payload.aud !== process.env.GOOGLE_CLIENT_ID) {
+  // The id_token audience equals the client ID of the platform that signed
+  // in (web/android/ios/expo), so accept any configured ID. Empty list =
+  // accept any Google-verified token (dev only; set IDs in production).
+  const googleAudiences = [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_ANDROID_CLIENT_ID,
+    process.env.GOOGLE_IOS_CLIENT_ID,
+    process.env.GOOGLE_EXPO_CLIENT_ID,
+  ]
+    .map((s) => (s || '').trim())
+    .filter(Boolean);
+  if (googleAudiences.length && !googleAudiences.includes(payload.aud)) {
     throw new Error('Google token audience mismatch');
   }
 
@@ -78,16 +102,38 @@ exports.registerPatient = async (req, res) => {
     `, [name, normalizedEmail, hash, code]);
 
     const userId = inserted.rows[0].id;
-    const patientCode = generatePatientCode(userId);
+    // Random non-sequential code; pre-checked for uniqueness via the txn client
+    // so the check sees uncommitted rows from concurrent txns consistently.
+    let patientCode = await generateUniquePatientCode(
+      (sql, params) => client.query(sql, params)
+    );
 
     // Plain INSERT: userId is brand-new so no patient row can exist yet.
     // Avoids ON CONFLICT(user_id) which requires UNIQUE(patients.user_id)
     // (added by 002 migration; older DBs without it throw 42P10).
-    await client.query(
-      `INSERT INTO patients (user_id, patient_code)
-       VALUES ($1, $2)`,
-      [userId, patientCode]
-    );
+    // Residual race: two concurrent registrations may pass the pre-check with
+    // the same code; the loser gets 23505 on patient_code. Regenerate once
+    // and retry. (user_id cannot collide here, so 23505 means patient_code.)
+    try {
+      await client.query(
+        `INSERT INTO patients (user_id, patient_code)
+         VALUES ($1, $2)`,
+        [userId, patientCode]
+      );
+    } catch (patientInsertErr) {
+      if (patientInsertErr && patientInsertErr.code === '23505') {
+        patientCode = await generateUniquePatientCode(
+          (sql, params) => client.query(sql, params)
+        );
+        await client.query(
+          `INSERT INTO patients (user_id, patient_code)
+           VALUES ($1, $2)`,
+          [userId, patientCode]
+        );
+      } else {
+        throw patientInsertErr;
+      }
+    }
 
     await client.query('COMMIT');
 
@@ -123,6 +169,13 @@ exports.registerPatient = async (req, res) => {
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
     if (e && e.code === '23505') {
+      // Email conflicts come from the users INSERT above. A patient_code
+      // collision surviving the regenerate-and-retry is vanishingly unlikely;
+      // surface it as a 500 rather than misreporting "email in use".
+      if (isPatientCodeConflict(e)) {
+        console.error('registerPatient patient_code collision after retry:', e.detail || e.message);
+        return res.status(500).json({ error: 'Registration failed.' });
+      }
       return res.status(400).json({ error: 'Email already in use.' });
     }
     console.error(e);
@@ -415,12 +468,35 @@ exports.googleLogin = async (req, res) => {
 
       const patientExists = (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [user.id])).rowCount > 0;
       if (!patientExists) {
-        const patientCode = generatePatientCode(user.id);
-        await pool.query(
-          `INSERT INTO patients (user_id, patient_code)
-           VALUES ($1, $2)`,
-          [user.id, patientCode]
-        );
+        const queryViaPool = (sql, params) => pool.query(sql, params);
+        const patientCode = await generateUniquePatientCode(queryViaPool);
+        try {
+          await pool.query(
+            `INSERT INTO patients (user_id, patient_code)
+             VALUES ($1, $2)`,
+            [user.id, patientCode]
+          );
+        } catch (patientInsertErr) {
+          if (!patientInsertErr || patientInsertErr.code !== '23505') throw patientInsertErr;
+          // Residual race — re-check before retrying:
+          // - user_id conflict (concurrent login created the row first):
+          //   the record now exists, so continue login without retrying.
+          // - patient_code conflict: regenerate once and retry the insert.
+          const nowExists =
+            (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [user.id])).rowCount > 0;
+          if (nowExists) {
+            // Concurrent creation won — nothing more to do.
+          } else if (isPatientCodeConflict(patientInsertErr)) {
+            const retryCode = await generateUniquePatientCode(queryViaPool);
+            await pool.query(
+              `INSERT INTO patients (user_id, patient_code)
+               VALUES ($1, $2)`,
+              [user.id, retryCode]
+            );
+          } else {
+            throw patientInsertErr;
+          }
+        }
       }
 
       const token = signToken(user);
@@ -440,12 +516,30 @@ exports.googleLogin = async (req, res) => {
     );
 
     const user = inserted.rows[0];
-    const patientCode = generatePatientCode(user.id);
-    await pool.query(
-      `INSERT INTO patients (user_id, patient_code)
-       VALUES ($1, $2)`,
-      [user.id, patientCode]
-    );
+    // Random non-sequential code, pre-checked for uniqueness via pool.
+    const queryViaPool = (sql, params) => pool.query(sql, params);
+    let patientCode = await generateUniquePatientCode(queryViaPool);
+    // Residual race: same-code concurrent insert yields 23505 on
+    // patient_code (user_id is brand-new, so it cannot collide here).
+    // Regenerate once and retry.
+    try {
+      await pool.query(
+        `INSERT INTO patients (user_id, patient_code)
+         VALUES ($1, $2)`,
+        [user.id, patientCode]
+      );
+    } catch (patientInsertErr) {
+      if (patientInsertErr && patientInsertErr.code === '23505') {
+        patientCode = await generateUniquePatientCode(queryViaPool);
+        await pool.query(
+          `INSERT INTO patients (user_id, patient_code)
+           VALUES ($1, $2)`,
+          [user.id, patientCode]
+        );
+      } else {
+        throw patientInsertErr;
+      }
+    }
 
     const token = signToken(user);
     return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
