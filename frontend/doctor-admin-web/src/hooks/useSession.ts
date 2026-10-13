@@ -1,0 +1,35 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { Session } from '../types';
+import { clearSession, loadSession, saveSession } from '../utils/authStorage';
+
+/**
+ * Persistent session hook.
+ * - Restores token+user from localStorage on load.
+ * - `login` persists, `logout` clears.
+ */
+export function useSession() {
+  const [session, setSession] = useState<Session | null>(() => loadSession());
+  const [restored, setRestored] = useState(false);
+
+  useEffect(() => {
+    // Session is already restored via the lazy initializer above; this effect
+    // only flips the flag after mount to avoid a sync setState-in-effect.
+    const id = requestAnimationFrame(() => setRestored(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  const login = useCallback((next: Session) => {
+    saveSession(next);
+    setSession(next);
+  }, []);
+
+  const logout = useCallback(() => {
+    clearSession();
+    setSession(null);
+  }, []);
+
+  return useMemo(
+    () => ({ session, restored, login, logout, setSession }),
+    [session, restored, login, logout],
+  );
+}

@@ -13,9 +13,14 @@ router.post('/register/patient', [
   body('name').notEmpty().trim()
 ], validate, ctrl.registerPatient);
 
-// Deprecated stub (410 Gone): kept so old clients get a clear message.
-// Email verification is deferred — accounts are active on registration.
-router.post('/verify-email', ctrl.verifyEmail);
+// Email verification (real): code issued at registration, 15-min expiry.
+router.post('/verify-email', [
+  body('email').isEmail().normalizeEmail(),
+  body('code').matches(/^\d{6}$/),
+], validate, ctrl.verifyEmail);
+router.post('/resend-verification', forgotLimiter, [
+  body('email').isEmail().normalizeEmail(),
+], validate, ctrl.resendVerification);
 
 // Login (rate-limited: brute-force protection)
 router.post('/login', loginLimiter, [

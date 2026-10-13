@@ -8,7 +8,7 @@ const validate = require('../middleware/validate');
 
 // Patient endpoints
 router.post('/', roleAuth('patient'), [
-    body('doctor_id').isInt({ min: 1 }).withMessage('doctor_id must be an integer'),
+    body('doctor_id').optional().isInt({ min: 1 }).withMessage('doctor_id must be an integer'),
     body('scheduled_at').optional().isISO8601().withMessage('scheduled_at must be ISO8601'),
     body('date_time').optional().isISO8601().withMessage('date_time must be ISO8601'),
     body('reason').optional().trim(),

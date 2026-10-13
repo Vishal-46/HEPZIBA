@@ -35,10 +35,13 @@ The repository is structured as a monorepo containing the following key componen
 
 ### 1. Database Setup
 1. Create a PostgreSQL database for the project.
-2. Execute the `hepziba_schema.sql` script to set up the initial tables (`users`, `patients`, `appointments`).
+2. Apply migrations in order (all idempotent; re-running `002` is safe):
    ```bash
    psql -U your_username -d your_database_name -f hepziba_schema.sql
+   psql -U your_username -d your_database_name -f backend/sql/001_hospital_alignment.sql
+   psql -U your_username -d your_database_name -f backend/sql/002_fix_doctors_and_constraints.sql
    ```
+   This sets up `users`, `patients`, `doctors`, `appointments`, plus prescriptions/billing/inventory tables. Note: on a fresh DB, `001` may stop at `prescriptions` with `relation "doctors" does not exist` (it references `doctors` before it exists); `002` creates `doctors` and any missing tables, so just continue to `002`. See `db-schema.md` and `backend/sql/README.md` for details and verification steps.
 
 ### 2. Backend Setup
 1. Navigate to the backend directory: `cd backend`

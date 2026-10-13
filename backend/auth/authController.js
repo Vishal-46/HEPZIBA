@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const https = require('https');
 const { hashPassword, checkPassword, generateCode, generateSecureToken } = require('../utils/crypto');
 const { sendMail } = require('../mailer/mailer');
+const { verificationEmail, passwordResetEmail } = require('../mailer/templates');
 const { generatePatientCode } = require('../utils/patientCode');
 
 // Helper to sign JWTs — throws when JWT_SECRET is missing so callers
@@ -51,7 +52,7 @@ async function verifyGoogleIdToken(idToken) {
   return payload;
 }
 
-// --------- PATIENT REGISTRATION ----------
+// --------- PATIENT REGISTRATION (with real email verification) ----------
 exports.registerPatient = async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || !email || !password)
@@ -69,15 +70,12 @@ exports.registerPatient = async (req, res) => {
     }
 
     const hash = await hashPassword(password);
-
-    // M1: email verification is optional/deferred. Accounts are usable
-    // immediately for both password and OAuth login; email_verified stays
-    // as informational metadata, not a login gate.
+    const code = generateCode();
     const inserted = await client.query(`
-      INSERT INTO users (name, email, password, role, email_verified)
-      VALUES ($1,$2,$3,'patient',TRUE)
+      INSERT INTO users (name, email, password, role, email_verified, verification_code, verification_code_expires_at)
+      VALUES ($1,$2,$3,'patient',FALSE,$4,NOW() + INTERVAL '15 minutes')
       RETURNING id
-    `, [name, normalizedEmail, hash]);
+    `, [name, normalizedEmail, hash, code]);
 
     const userId = inserted.rows[0].id;
     const patientCode = generatePatientCode(userId);
@@ -93,10 +91,35 @@ exports.registerPatient = async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Verification email intentionally not sent (verification deferred).
-    // See deprecated verifyEmail handler below.
+    try {
+      const tpl = verificationEmail(code, { patientCode });
+      await sendMail({
+        to: normalizedEmail,
+        from: process.env.FROM_EMAIL,
+        subject: tpl.subject,
+        text: tpl.text,
+        html: tpl.html,
+      });
+    } catch (mailErr) {
+      console.error('registerPatient mailer failure:', mailErr.message);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[dev] verification code for ${normalizedEmail}: ${code} (valid 15 min)`);
+      }
+      // Account exists but email never arrived — client can resend.
+      return res.status(201).json({
+        message: 'Account created but verification email could not be sent. Please resend the code.',
+        patient_code: patientCode,
+        requiresVerification: true,
+        mailSent: false,
+      });
+    }
 
-    res.json({ message: 'Registration successful.', patient_code: patientCode });
+    res.status(201).json({
+      message: 'Account created. Verification code sent to your email.',
+      patient_code: patientCode,
+      requiresVerification: true,
+      mailSent: true,
+    });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
     if (e && e.code === '23505') {
@@ -188,14 +211,71 @@ exports.registerDoctor = async (req, res) => {
   }
 };
 
-// --------- VERIFY EMAIL (DEPRECATED) ----------
-// Email verification is deferred: registrations mark email_verified=TRUE and
-// no codes are issued, so this path is dead. Kept as a 410 stub so old
-// clients get a clear message instead of a confusing "invalid code" error.
+// --------- VERIFY EMAIL (real) ----------
 exports.verifyEmail = async (req, res) => {
-  return res.status(410).json({
-    error: 'Email verification is no longer required. Your account is active — please log in.',
-  });
+  const { email, code } = req.body;
+  if (!email || !code) return res.status(400).json({ error: 'Missing field.' });
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const trimmedCode = String(code).trim();
+  try {
+    const q = await pool.query(
+      `SELECT id, verification_code, verification_code_expires_at, email_verified FROM users WHERE email=$1`,
+      [normalizedEmail]
+    );
+    if (!q.rows.length) return res.status(400).json({ error: 'Invalid code.' });
+    const user = q.rows[0];
+    if (user.email_verified) return res.json({ message: 'Email already verified. Please log in.' });
+    if (!user.verification_code || user.verification_code !== trimmedCode ||
+        !user.verification_code_expires_at || new Date(user.verification_code_expires_at) < new Date()) {
+      return res.status(400).json({ error: 'Invalid or expired code.' });
+    }
+    await pool.query(
+      `UPDATE users SET email_verified=TRUE, verification_code=NULL, verification_code_expires_at=NULL WHERE id=$1`,
+      [user.id]
+    );
+    res.json({ message: 'Email verified. Please log in.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Verification failed.' });
+  }
+};
+
+// --------- RESEND VERIFICATION CODE ----------
+exports.resendVerification = async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Missing field.' });
+  const normalizedEmail = String(email).trim().toLowerCase();
+  try {
+    const q = await pool.query(`SELECT id, email_verified FROM users WHERE email=$1`, [normalizedEmail]);
+    if (!q.rows.length) return res.status(400).json({ error: 'Account not found. Please register.' });
+    const user = q.rows[0];
+    if (user.email_verified) return res.json({ message: 'Email already verified. Please log in.' });
+    const code = generateCode();
+    await pool.query(
+      `UPDATE users SET verification_code=$1, verification_code_expires_at=NOW() + INTERVAL '15 minutes' WHERE id=$2`,
+      [code, user.id]
+    );
+    try {
+      const tpl = verificationEmail(code);
+      await sendMail({
+        to: normalizedEmail,
+        from: process.env.FROM_EMAIL,
+        subject: tpl.subject,
+        text: tpl.text,
+        html: tpl.html,
+      });
+    } catch (mailErr) {
+      console.error('resendVerification mailer failure:', mailErr.message);
+      if (process.env.NODE_ENV === 'production') {
+        return res.status(500).json({ error: 'Could not send verification email, please try again.' });
+      }
+      console.log(`[dev] verification code for ${normalizedEmail}: ${code} (valid 15 min)`);
+    }
+    res.json({ message: 'Verification code resent to your email.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Resend failed.' });
+  }
 };
 
 // --------- LOGIN ----------
@@ -210,8 +290,9 @@ exports.login = async (req, res) => {
     if (q.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials.' });
     const user = q.rows[0];
     if (!user.active) return res.status(401).json({ error: 'Account deactivated.' });
-    // M1: email_verified is optional — do NOT block login on it, so OAuth-
-    // created and legacy-unverified accounts can sign in with a password.
+    if (!user.email_verified) {
+      return res.status(403).json({ error: 'Email not verified. Please verify your email.', code: 'EMAIL_NOT_VERIFIED' });
+    }
     if (!user.password) return res.status(401).json({ error: 'Invalid credentials.' });
     const ok = await checkPassword(password, user.password);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials.' });
@@ -246,21 +327,27 @@ exports.forgotPassword = async (req, res) => {
       [code, user.id]
     );
     try {
+      const tpl = passwordResetEmail(code);
       await sendMail({
         to: normalizedEmail,
         from: process.env.FROM_EMAIL,
-        subject: `[Hepziba] Password Reset`,
-        text: `Your password reset code is: ${code}\nValid for 15 minutes.`
+        subject: tpl.subject,
+        text: tpl.text,
+        html: tpl.html,
       });
     } catch (mailErr) {
-      // Compensating rollback: clear the code the user never received so a
-      // stale code cannot linger, then surface a retryable 500.
       console.error('forgotPassword mailer failure:', mailErr.message);
-      await pool.query(
-        `UPDATE users SET reset_code=NULL, reset_code_expires_at=NULL WHERE id=$1`,
-        [user.id]
-      );
-      return res.status(500).json({ error: 'Could not send reset email, please try again.' });
+      if (process.env.NODE_ENV === 'production') {
+        // Prod: do not leave a code the user never received.
+        await pool.query(
+          `UPDATE users SET reset_code=NULL, reset_code_expires_at=NULL WHERE id=$1`,
+          [user.id]
+        );
+        return res.status(500).json({ error: 'Could not send reset email, please try again.' });
+      }
+      // Dev: local networks often block outbound SMTP. Keep the stored code so
+      // testing can continue, and print it to the backend console (dev only).
+      console.log(`[dev] password-reset code for ${normalizedEmail}: ${code} (valid 15 min)`);
     }
     res.json(genericMsg);
   } catch (e) {

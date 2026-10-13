@@ -28,11 +28,7 @@ export default function InvoiceDetailScreen({ route, navigation }: any) {
   );
 }
 
-const createStyles = <T extends Record<string, unknown>>(styles: T): T => {
-  return typeof StyleSheet.create === 'function' ? StyleSheet.create(styles) : styles;
-};
-
-const s = createStyles({
+const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLOR.background },
   content: { padding: SPACING.l },
   card: { backgroundColor: COLOR.surface, borderRadius: RADIUS.lg, padding: SPACING.m, ...SHADOW.card },

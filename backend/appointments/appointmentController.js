@@ -14,11 +14,11 @@ function parsePagination(req, defaultLimit = 20, maxLimit = 100) {
 // Patient books an appointment
 exports.createAppointment = async (req, res) => {
   // Backward compat: accept scheduled_at (preferred) or legacy date_time.
+  // doctor_id is optional (single-doctor clinic): when missing/invalid the
+  // first active doctor is assigned inside the transaction below.
   const rawScheduled = req.body.scheduled_at ?? req.body.date_time;
-  const doctorIdNum = Number(req.body.doctor_id);
-  if (!Number.isInteger(doctorIdNum) || doctorIdNum < 1) {
-    return res.status(400).json({ error: 'doctor_id must be an integer' });
-  }
+  let doctorIdNum = Number(req.body.doctor_id);
+  const doctorIdProvided = Number.isInteger(doctorIdNum) && doctorIdNum >= 1;
   if (rawScheduled === undefined || rawScheduled === null || String(rawScheduled).trim() === '') {
     return res.status(400).json({ error: 'doctor_id and scheduled_at required' });
   }
@@ -51,6 +51,35 @@ exports.createAppointment = async (req, res) => {
         return res.status(400).json({ error: 'Patient profile not found' });
       }
       const patient_id = q.rows[0].id;
+
+      // Default doctor: first active doctor profile; else first active
+      // doctor user (creating its profile row); else fail loudly.
+      if (!doctorIdProvided) {
+        const firstDoc = await client.query(
+          `SELECT d.id FROM doctors d JOIN users u ON u.id = d.user_id
+           WHERE COALESCE(u.active, TRUE) = TRUE ORDER BY d.id LIMIT 1`
+        );
+        if (firstDoc.rows.length) {
+          doctorIdNum = firstDoc.rows[0].id;
+        } else {
+          const firstUser = await client.query(
+            `SELECT id FROM users WHERE role='doctor' AND COALESCE(active, TRUE) = TRUE ORDER BY id LIMIT 1`
+          );
+          if (!firstUser.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'No doctors available right now' });
+          }
+          const du = firstUser.rows[0].id;
+          const hasProfile = await client.query('SELECT id FROM doctors WHERE user_id=$1', [du]);
+          if (hasProfile.rows.length) doctorIdNum = hasProfile.rows[0].id;
+          else {
+            const created = await client.query(
+              'INSERT INTO doctors (user_id) VALUES ($1) RETURNING id', [du]
+            );
+            doctorIdNum = created.rows[0].id;
+          }
+        }
+      }
 
       // Resolve doctor profile id from either doctors.id or users.id
       let doctorProfileId = doctorIdNum;

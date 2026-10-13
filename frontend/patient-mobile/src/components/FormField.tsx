@@ -35,11 +35,7 @@ export default function FormField({
   );
 }
 
-const createStyles = <T extends Record<string, unknown>>(styles: T): T => {
-  return typeof StyleSheet.create === 'function' ? StyleSheet.create(styles) : styles;
-};
-
-const s = createStyles({
+const s = StyleSheet.create({
   wrap: {
     marginBottom: SPACING.s,
   },
@@ -62,6 +58,6 @@ const s = createStyles({
   },
   inputMultiline: {
     minHeight: 96,
-    textAlignVertical: 'top',
+    textAlignVertical: 'top' as const,
   },
 });

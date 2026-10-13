@@ -485,6 +485,114 @@ button {
   align-items: center;
 }
 
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.listToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 12px 0;
+}
+
+.searchField {
+  flex: 1 1 220px;
+}
+
+.searchField input {
+  width: 100%;
+}
+
+.checkRow {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.pagerBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pagerStatus {
+  font-size: 13px;
+  color: var(--slate-600);
+}
+
+.emptyState {
+  background: var(--mist-100);
+  border-radius: 12px;
+  padding: 18px;
+  text-align: center;
+  margin-top: 12px;
+}
+
+.loadingState {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px;
+  justify-content: center;
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--slate-200);
+  border-top-color: var(--teal-600);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.settingsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.medRow {
+  background: var(--mist-100);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 6px;
+}
+
+.medRow .medName {
+  flex: 2 1 160px;
+  padding: 6px 8px;
+}
+
+.doseCheck {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
 @media (max-width: 1024px) {
   .authLayout {
     grid-template-columns: 1fr;
@@ -529,5 +637,33 @@ button {
     flex-direction: column;
     align-items: flex-start;
     gap: 12px;
+  }
+
+  .settingsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .pager {
+    flex-direction: column;
+  }
+}
+
+@media print {
+  .topBar nav,
+  .doctorSidebar,
+  .listToolbar,
+  .pager,
+  .inlineBtns {
+    display: none;
+  }
+
+  .shell {
+    max-width: none;
+    padding: 0;
+  }
+
+  .card {
+    box-shadow: none;
+    border: 1px solid #999;
   }
 }

@@ -1,3 +1,8 @@
+/**
+ * @deprecated Dead screen — kept for reference only, NOT wired into navigation.
+ * The live patient flow is `PatientHomeScreen.tsx` (routed from App.tsx).
+ * Do not import this file. Safe to delete after one release once confirmed unused.
+ */
 import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity } from 'react-native';
 import { COLOR, FONT, SPACING, RADIUS, SHADOW } from '../../theme';
 
