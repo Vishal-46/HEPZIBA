@@ -62,3 +62,56 @@ export type ClinicHours = {
   days: string;
   slotMinutes: string;
 };
+
+export type Patient = {
+  id: number;
+  patient_id?: number;
+  user_id?: number;
+  patient_code?: string;
+  name: string;
+  email?: string;
+  age?: number | string;
+  sex?: string;
+  dob?: string;
+  address?: string;
+  mobile?: string;
+  photo_url?: string;
+  aadhar_number?: string;
+  height_cm?: number | string;
+  weight_kg?: number | string;
+  bp?: string;
+  spo2?: number | string;
+  created_at?: string;
+  appointments?: Appointment[];
+  prescriptions?: unknown[];
+  invoices?: Invoice[];
+};
+
+export type InvoiceItem = {
+  id?: number;
+  medicine_name: string;
+  expiry_date?: string;
+  unit?: string;
+  mrp: number | string;
+  quantity: number | string;
+  total: number | string;
+};
+
+export type Invoice = {
+  id: number;
+  patient_id: number;
+  patient_name?: string;
+  patient_code?: string;
+  patient_age?: number;
+  patient_sex?: string;
+  patient_mobile?: string;
+  patient_address?: string;
+  patient_aadhar?: string;
+  appointment_id?: number | null;
+  doctor_name?: string;
+  invoice_date?: string;
+  total_amount: number | string;
+  status?: string;
+  items?: InvoiceItem[];
+};
+

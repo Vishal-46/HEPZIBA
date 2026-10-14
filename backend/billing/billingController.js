@@ -195,3 +195,61 @@ exports.getInvoiceById = async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch invoice' });
   }
 };
+
+exports.listInvoices = async (req, res) => {
+  try {
+    const { limit, offset } = parsePagination(req, 50);
+    const q = req.query.q ? String(req.query.q).trim() : '';
+
+    let whereClause = '';
+    const params = [];
+    if (q) {
+      params.push(`%${q}%`);
+      whereClause = `WHERE (pu.name ILIKE $1 OR p.patient_code ILIKE $1 OR inv.doctor_name ILIKE $1)`;
+    }
+
+    const query = `
+      SELECT 
+        inv.*,
+        p.patient_code,
+        p.age AS patient_age,
+        p.sex AS patient_sex,
+        p.mobile AS patient_mobile,
+        p.address AS patient_address,
+        p.aadhar_number AS patient_aadhar,
+        pu.name AS patient_name
+      FROM invoices inv
+      JOIN patients p ON p.id = inv.patient_id
+      JOIN users pu ON pu.id = p.user_id
+      ${whereClause}
+      ORDER BY inv.invoice_date DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+    params.push(limit, offset);
+    const invoicesQ = await pool.query(query, params);
+
+    if (!invoicesQ.rows.length) return res.json([]);
+
+    const ids = invoicesQ.rows.map((r) => r.id);
+    const itemsQ = await pool.query(
+      'SELECT * FROM invoice_items WHERE invoice_id = ANY($1::int[]) ORDER BY invoice_id ASC, id ASC',
+      [ids]
+    );
+    const byInvoice = new Map();
+    for (const it of itemsQ.rows) {
+      if (!byInvoice.has(it.invoice_id)) byInvoice.set(it.invoice_id, []);
+      byInvoice.get(it.invoice_id).push(it);
+    }
+
+    const result = invoicesQ.rows.map((invoice) => ({
+      ...invoice,
+      items: byInvoice.get(invoice.id) || [],
+    }));
+
+    return res.json(result);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to fetch invoices' });
+  }
+};
+

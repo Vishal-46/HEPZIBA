@@ -75,5 +75,7 @@ The repository is structured as a monorepo containing the following key componen
 4. Start the Expo server: `npx expo start -c` (Use the Expo Go app on your phone or an emulator to preview).
 5. Production test build (APK): `eas build -p android --profile preview` (API URL is baked in at build time, so rebuild after `.env` changes).
 
-## Current Development Tasks
-Refer to the `PROJECT_STATUS_REPORT.md` for immediate action items, which currently include locating the Doctor-Admin UI (now found!), verifying DB implementations, auditing code for validation/errors, and planning the deployment strategy.
+## Contributors
+- **Anjai7** ([@Anjai7](https://github.com/Anjai7)) — Walk-in patient registration, clinical vitals & SpO2 tracking, token scheduling, billing & invoicing generator, EHR records.
+- **Vishal-46** ([@Vishal-46](https://github.com/Vishal-46)) — Core backend, Google OAuth, session tokens, mobile app.
+

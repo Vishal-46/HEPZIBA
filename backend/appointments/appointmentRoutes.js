@@ -6,8 +6,9 @@ const roleAuth = require('../middleware/roleAuth');
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
 
-// Patient endpoints
-router.post('/', roleAuth('patient'), [
+// Booking endpoint (patients self-book, or admin/doctor book on behalf of patient)
+router.post('/', roleAuth(['patient', 'admin', 'doctor']), [
+    body('patient_id').optional().isInt({ min: 1 }).withMessage('patient_id must be an integer'),
     body('doctor_id').optional().isInt({ min: 1 }).withMessage('doctor_id must be an integer'),
     body('scheduled_at').optional().isISO8601().withMessage('scheduled_at must be ISO8601'),
     body('date_time').optional().isISO8601().withMessage('date_time must be ISO8601'),

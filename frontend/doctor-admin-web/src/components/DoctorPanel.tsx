@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useDoctorAppointments } from '../hooks/useDoctorData';
 import { usePaginatedSearch } from '../hooks/usePaginatedSearch';
-import type { MedicineRow } from '../types';
+import type { MedicineRow, Patient } from '../types';
 import { formatDate, maskAadhaar } from '../utils/format';
 import { printPrescription } from '../utils/prescriptionPrint';
+import EHRModal from './EHRModal';
 import { EmptyState, LoadingState, Pager, SearchInput } from './ListControls';
+
 
 const PAGE_SIZE = 8;
 
@@ -27,6 +29,7 @@ export default function DoctorPanel() {
   const [medicines, setMedicines] = useState<MedicineRow[]>([]);
   const [saving, setSaving] = useState(false);
   const [showTodayOnly, setShowTodayOnly] = useState(true);
+  const [ehrPatient, setEhrPatient] = useState<Patient | null>(null);
 
   useEffect(() => {
     load();
@@ -202,15 +205,36 @@ export default function DoctorPanel() {
               <div className="detailGrid">
                 <div>
                   <p className="label">Patient</p>
-                  <p>{selected.patient_name || 'Patient'}</p>
+                  <p><strong>{selected.patient_name || 'Patient'}</strong></p>
                   <p className="muted">Aadhaar: {maskAadhaar(selected.patient_aadhaar ?? selected.aadhaar)}</p>
+                  <button
+                    type="button"
+                    className="ghostBtn"
+                    style={{ fontSize: '12px', padding: '3px 8px', marginTop: '6px' }}
+                    onClick={() => {
+                      setEhrPatient({
+                        id: Number(selected.patient_id) || selected.id,
+                        name: String(selected.patient_name || 'Patient'),
+                        patient_code: typeof selected.patient_code === 'string' ? selected.patient_code : undefined,
+                        mobile: typeof selected.mobile === 'string' ? selected.mobile : undefined,
+                        aadhar_number: typeof selected.patient_aadhaar === 'string' ? selected.patient_aadhaar : undefined,
+                        bp: typeof selected.bp === 'string' ? selected.bp : undefined,
+                        spo2: typeof selected.spo2 === 'number' || typeof selected.spo2 === 'string' ? selected.spo2 : undefined,
+                        age: typeof selected.age === 'number' ? selected.age : undefined,
+                        sex: typeof selected.sex === 'string' ? selected.sex : undefined,
+                      });
+                    }}
+                  >
+                    🩺 View Full EHR
+                  </button>
                 </div>
                 <div>
-                  <p className="label">Schedule</p>
-                  <p>{formatDate(selected.scheduled_at)}</p>
+                  <p className="label">Schedule & Token</p>
+                  <p><strong>Token #{String(selected.token_number || selected.id)}</strong></p>
+                  <p className="muted">{formatDate(selected.scheduled_at)}</p>
                 </div>
                 <div>
-                  <p className="label">Reason</p>
+                  <p className="label">Reason / Clinical Note</p>
                   <p>{selected.reason || 'Respiratory consultation'}</p>
                 </div>
                 <div>
@@ -223,6 +247,20 @@ export default function DoctorPanel() {
                   </select>
                 </div>
               </div>
+
+              {(Boolean(selected.bp) || Boolean(selected.spo2)) && (
+                <div style={{ background: '#f0f9ff', padding: '8px 14px', borderRadius: '6px', border: '1px solid #bae6fd', margin: '10px 0', display: 'flex', gap: '20px' }}>
+                  {Boolean(selected.bp) && <span><strong>Blood Pressure:</strong> {String(selected.bp)}</span>}
+                  {Boolean(selected.spo2) && (
+                    <span>
+                      <strong>SpO2:</strong>{' '}
+                      <span style={{ color: Number(selected.spo2) < 95 ? '#dc2626' : '#16a34a', fontWeight: 'bold' }}>
+                        {String(selected.spo2)}%
+                      </span>
+                    </span>
+                  )}
+                </div>
+              )}
               <label>
                 Notes
                 <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
@@ -298,6 +336,14 @@ export default function DoctorPanel() {
           )}
         </section>
       </div>
+
+      {ehrPatient && (
+        <EHRModal
+          patient={ehrPatient}
+          onClose={() => setEhrPatient(null)}
+        />
+      )}
     </div>
   );
 }
+

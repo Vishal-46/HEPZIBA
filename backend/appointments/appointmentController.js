@@ -45,12 +45,27 @@ exports.createAppointment = async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      const q = await client.query('SELECT id FROM patients WHERE user_id=$1', [req.user.id]);
-      if (!q.rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Patient profile not found' });
+      let patient_id;
+      if (req.user.role === 'admin' || req.user.role === 'doctor') {
+        const pid = Number(req.body.patient_id);
+        if (!Number.isInteger(pid) || pid < 1) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Valid patient_id is required for admin booking' });
+        }
+        const chk = await client.query('SELECT id FROM patients WHERE id=$1', [pid]);
+        if (!chk.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Patient not found' });
+        }
+        patient_id = pid;
+      } else {
+        const q = await client.query('SELECT id FROM patients WHERE user_id=$1', [req.user.id]);
+        if (!q.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Patient profile not found' });
+        }
+        patient_id = q.rows[0].id;
       }
-      const patient_id = q.rows[0].id;
 
       // Default doctor: first active doctor profile; else first active
       // doctor user (creating its profile row); else fail loudly.
