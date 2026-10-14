@@ -33,6 +33,12 @@ router.post('/google', loginLimiter, [
   body('idToken').notEmpty().isString().trim()
 ], validate, ctrl.googleLogin);
 
+// Session refresh + logout (refresh is rate-limited like login: token-guessing protection)
+router.post('/refresh', loginLimiter, [
+  body('refreshToken').notEmpty().isString().trim()
+], validate, ctrl.refresh);
+router.post('/logout', ctrl.logout);
+
 // Google OAuth via backend (no Expo proxy / no frontend client IDs).
 // App opens GET /auth/google/start in a browser; Google redirects to the
 // backend callback, which finally redirects to the mobile deep link.
@@ -50,6 +56,9 @@ router.post('/reset-password', resetLimiter, [
 ], validate, ctrl.resetPassword);
 
 const roleAuth = require('../middleware/roleAuth');
+
+// Kill every session on all devices (requires any valid access token).
+router.post('/logout-all', roleAuth(['patient', 'doctor', 'admin']), ctrl.logoutAll);
 
 // Admin-only registration endpoints — NEVER public. There is no public
 // signup for doctor/admin roles. The very first admin cannot be created via

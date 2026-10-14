@@ -20,14 +20,20 @@ function isPatientCodeConflict(e) {
   return true;
 }
 
-// Helper to sign JWTs — throws when JWT_SECRET is missing so callers
-// fail closed (500) instead of issuing unsigned/unverifiable tokens.
+const {
+  issueSession,
+  rotateRefreshToken,
+  revokeRefreshToken,
+  revokeAllUserRefreshTokens,
+  denylistAccessToken,
+  requestMeta,
+} = require('./sessionTokens');
+
+// Helper to sign short-lived access JWTs — throws when JWT_SECRET is missing
+// so callers fail closed (500) instead of issuing unsigned/unverifiable tokens.
+// Access tokens carry a jti so POST /auth/logout can denylist them instantly.
 function signToken(user) {
-  if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured');
-  return jwt.sign(
-    { id: user.id, role: user.role, email: user.email },
-    process.env.JWT_SECRET, { expiresIn: '4h' }
-  );
+  return require('./sessionTokens').signAccessToken(user);
 }
 
 function fetchJson(url) {
@@ -351,8 +357,8 @@ exports.login = async (req, res) => {
     const ok = await checkPassword(password, user.password);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials.' });
 
-    const token = signToken(user);
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    const session = await issueSession(user, requestMeta(req));
+    res.json(session);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Login failed.' });
@@ -443,7 +449,8 @@ exports.resetPassword = async (req, res) => {
 
 // --------- GOOGLE LOGIN (shared user find/create) ----------
 // Takes a verified Google tokeninfo payload, finds or creates the patient,
-// and returns { token, user }. Throws with .status for HTTP mapping.
+// and returns the user row { id, name, email, role }. Callers issue a session
+// (access + refresh) via issueSession(). Throws with .status for HTTP mapping.
 async function findOrCreatePatientFromGooglePayload(googlePayload) {
   const normalizedEmail = String(googlePayload.email || '').trim().toLowerCase();
   if (!normalizedEmail) {
@@ -509,8 +516,8 @@ async function findOrCreatePatientFromGooglePayload(googlePayload) {
       }
     }
 
-    const token = signToken(user);
-    return { token, user: { id: user.id, name: user.name, email: user.email, role: user.role } };
+    const tokenUser = { id: user.id, name: user.name, email: user.email, role: user.role };
+    return tokenUser;
   }
 
   const name = String(googlePayload.name || googlePayload.given_name || 'Patient').trim();
@@ -551,8 +558,8 @@ async function findOrCreatePatientFromGooglePayload(googlePayload) {
     }
   }
 
-  const token = signToken(user);
-  return { token, user: { id: user.id, name: user.name, email: user.email, role: user.role } };
+  const tokenUser = { id: user.id, name: user.name, email: user.email, role: user.role };
+  return tokenUser;
 }
 
 // --------- GOOGLE LOGIN (legacy direct idToken POST; kept for compat) ----------
@@ -562,7 +569,8 @@ exports.googleLogin = async (req, res) => {
 
   try {
     const googlePayload = await verifyGoogleIdToken(idToken);
-    const session = await findOrCreatePatientFromGooglePayload(googlePayload);
+    const tokenUser = await findOrCreatePatientFromGooglePayload(googlePayload);
+    const session = await issueSession(tokenUser, requestMeta(req));
     return res.json(session);
   } catch (e) {
     console.error(e);
@@ -711,7 +719,8 @@ exports.googleOAuthCallback = async (req, res) => {
   try {
     const tokens = await exchangeCodeForTokens({ code, clientId, clientSecret, redirectUri });
     const googlePayload = await verifyGoogleIdToken(tokens.id_token);
-    const session = await findOrCreatePatientFromGooglePayload(googlePayload);
+    const tokenUser = await findOrCreatePatientFromGooglePayload(googlePayload);
+    const session = await issueSession(tokenUser, requestMeta(req));
 
     const params = new URLSearchParams({
       token: session.token,
@@ -719,6 +728,7 @@ exports.googleOAuthCallback = async (req, res) => {
       name: session.user.name,
       email: session.user.email,
       role: session.user.role,
+      refresh: session.refreshToken,
     });
     const sep = returnTo.includes('?') ? '&' : '?';
     return res.redirect(`${returnTo}${sep}${params.toString()}`);
@@ -726,4 +736,55 @@ exports.googleOAuthCallback = async (req, res) => {
     console.error('googleOAuthCallback:', e && e.message);
     return redirectWithError(res, returnTo, (e instanceof Error ? e.message : 'Google login failed.'));
   }
+};
+
+// --------- SESSION REFRESH / LOGOUT ----------
+// POST /auth/refresh { refreshToken } -> rotates the family, returns a new pair.
+// Reuse of an already-rotated token kills the whole family (theft protection).
+exports.refresh = async (req, res) => {
+  const { refreshToken } = req.body || {};
+  if (!refreshToken || typeof refreshToken !== 'string') {
+    return res.status(400).json({ error: 'Missing refresh token.' });
+  }
+  try {
+    const session = await rotateRefreshToken(refreshToken, requestMeta(req));
+    return res.json(session);
+  } catch (e) {
+    const status = e && e.status ? e.status : 401;
+    return res.status(status).json({ error: e instanceof Error ? e.message : 'Refresh failed.' });
+  }
+};
+
+function bearerFrom(req) {
+  const header = req.headers.authorization || '';
+  const parts = header.split(' ');
+  if (parts.length === 2 && /^Bearer$/i.test(parts[0]) && parts[1]) return parts[1];
+  return null;
+}
+
+// POST /auth/logout { refreshToken? } -> revokes the refresh token (if given)
+// AND denylists the current access JWT (if a Bearer is present), so logout
+// takes effect immediately instead of at access expiry. Always 200.
+exports.logout = async (req, res) => {
+  try {
+    const { refreshToken } = req.body || {};
+    if (refreshToken && typeof refreshToken === 'string') await revokeRefreshToken(refreshToken);
+    const access = bearerFrom(req);
+    if (access) await denylistAccessToken(access);
+  } catch (e) {
+    console.error('logout:', e && e.message);
+  }
+  return res.json({ message: 'Logged out.' });
+};
+
+// POST /auth/logout-all (auth required) -> kills every session on all devices.
+exports.logoutAll = async (req, res) => {
+  try {
+    if (req.user && req.user.id) await revokeAllUserRefreshTokens(req.user.id);
+    const access = bearerFrom(req);
+    if (access) await denylistAccessToken(access);
+  } catch (e) {
+    console.error('logoutAll:', e && e.message);
+  }
+  return res.json({ message: 'Logged out everywhere.' });
 };

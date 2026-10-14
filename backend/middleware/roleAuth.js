@@ -28,6 +28,19 @@ function roleAuth(roles) {
     } catch {
       return res.status(401).json({ error: 'Invalid token' });
     }
+    // Server-side logout kill-switch: a logged-out access jti stays rejected
+    // until its exp, even though the JWT signature is still technically valid.
+    if (decoded && decoded.jti) {
+      try {
+        const { isAccessRevoked } = require('../auth/sessionTokens');
+        if (await isAccessRevoked(decoded.jti)) {
+          return res.status(401).json({ error: 'Session expired. Please sign in again.' });
+        }
+      } catch (e) {
+        console.error('roleAuth denylist check failed:', e.message);
+        return res.status(500).json({ error: 'Authorization check failed.' });
+      }
+    }
     if (!decoded || !roles.includes(decoded.role)) {
       return res.status(403).json({ error: 'Forbidden: insufficient role' });
     }

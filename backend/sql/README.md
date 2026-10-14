@@ -7,6 +7,8 @@ psql -U your_username -d your_database_name -f backend/sql/001_hospital_alignmen
 psql -U your_username -d your_database_name -f backend/sql/002_fix_doctors_and_constraints.sql
 # Re-run to prove idempotency:
 psql -U your_username -d your_database_name -f backend/sql/002_fix_doctors_and_constraints.sql
+# Session tokens (refresh rotation + logout denylist) — idempotent:
+psql -U your_username -d your_database_name -f backend/sql/005_session_tokens.sql
 ```
 `002_fix_doctors_and_constraints.sql` is forward-only and idempotent (safe to re-run).
 `002_seed_admin_example.sql` is a commented-out template only (no-op); consider renumbering it to `003_` to avoid the duplicate `002_` prefix.
