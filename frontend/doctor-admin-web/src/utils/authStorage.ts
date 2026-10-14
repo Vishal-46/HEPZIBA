@@ -1,5 +1,5 @@
 import type { AuthUser, Session } from '../types';
-import { TOKEN_KEY, USER_KEY } from './apiClient';
+import { REFRESH_KEY, TOKEN_KEY, USER_KEY } from './apiClient';
 
 export function loadSession(): Session | null {
   try {
@@ -10,7 +10,8 @@ export function loadSession(): Session | null {
     if (!token || !rawUser) return null;
     const user = JSON.parse(rawUser) as AuthUser;
     if (!user || typeof user !== 'object' || !user.role) return null;
-    return { token, user };
+    const refreshToken = localStorage.getItem(REFRESH_KEY);
+    return refreshToken ? { token, refreshToken, user } : { token, user };
   } catch {
     return null;
   }
@@ -19,6 +20,7 @@ export function loadSession(): Session | null {
 export function saveSession(session: Session): void {
   localStorage.setItem(TOKEN_KEY, session.token);
   localStorage.setItem(USER_KEY, JSON.stringify(session.user));
+  if (session.refreshToken) localStorage.setItem(REFRESH_KEY, session.refreshToken);
   // Keep legacy `token` key in sync for any older code paths.
   localStorage.setItem('token', session.token);
 }
@@ -26,6 +28,7 @@ export function saveSession(session: Session): void {
 export function clearSession(): void {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
+  localStorage.removeItem(REFRESH_KEY);
   localStorage.removeItem('token');
   localStorage.removeItem('user');
 }

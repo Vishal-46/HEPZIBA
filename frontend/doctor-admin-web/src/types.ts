@@ -9,7 +9,10 @@ export type AuthUser = {
 };
 
 export type Session = {
+  /** Short-lived access JWT. Sent as `Authorization: Bearer`. */
   token: string;
+  /** Long-lived opaque refresh token (rotating). Never sent as Bearer. */
+  refreshToken?: string;
   user: AuthUser;
 };
 

@@ -27,6 +27,7 @@ import { File, UploadType } from 'expo-file-system';
 import { API_BASE_URL, CLOUDINARY_UPLOAD_PRESET, CLOUDINARY_UPLOAD_URL } from '../config/api';
 import FormField from '../components/FormField';
 import { COLOR, FONT, RADIUS, SHADOW, SPACING } from '../../theme';
+import { Ionicons } from '@expo/vector-icons';
 import { createStackNavigator } from '@react-navigation/stack';
 import PrescriptionDetailScreen from './PrescriptionDetailScreen';
 import InvoiceDetailScreen from './InvoiceDetailScreen';
@@ -178,6 +179,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
     spo2: '',
   });
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const logoutRef = useRef(onLogout);
   logoutRef.current = onLogout;
 
@@ -315,18 +317,52 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
     }
   }, [doctors, selectedDoctorId]);
 
-  const upcomingCount = useMemo(() => {
-    const now = Date.now();
-    return appointments.filter((a) => {
-      const d = getAppointmentDate(a);
-      return d && d.getTime() >= now && a.status !== 'done' && a.status !== 'cancelled';
-    }).length;
-  }, [appointments]);
-
   const pendingBills = useMemo(
     () => invoices.filter((i) => (i.status || 'unpaid').toLowerCase() !== 'paid').length,
     [invoices],
   );
+
+  const unpaidTotal = useMemo(
+    () =>
+      invoices
+        .filter((i) => (i.status || 'unpaid').toLowerCase() !== 'paid')
+        .reduce((sum, i) => sum + (Number(i.total_amount) || 0), 0),
+    [invoices],
+  );
+
+  const profileGaps = useMemo(() => {
+    if (!profile) return [];
+    const gaps: string[] = [];
+    if (!profile.mobile) gaps.push('mobile number');
+    if (!profile.aadhar_number) gaps.push('Aadhaar');
+    if (!profile.address) gaps.push('address');
+    return gaps;
+  }, [profile]);
+
+  const latestRx = useMemo(() => {
+    if (!prescriptions.length) return null;
+    return [...prescriptions].sort(
+      (a, b) =>
+        new Date(b.prescribed_on || 0).getTime() - new Date(a.prescribed_on || 0).getTime(),
+    )[0];
+  }, [prescriptions]);
+
+  const hasVitals = Boolean(
+    profile && (profile.bp || profile.spo2 != null || profile.height_cm || profile.weight_kg),
+  );
+
+  const avatarUri = (
+    profile?.photo_url ||
+    (user as any)?.photo_url ||
+    (user as any)?.avatar ||
+    ''
+  ).trim();
+
+  // Reset the load-failure flag whenever the photo URI changes so a new
+  // (fixed) URL gets a fresh chance to render.
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [avatarUri]);
 
   const onDateChange = useCallback(
     (_event: any, selected?: Date) => {
@@ -427,6 +463,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
 
   const pickProfilePhoto = async () => {
     setErrorText('');
+    let pickedUri: string | undefined;
     try {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) {
@@ -448,6 +485,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         setErrorText('Could not read the selected image.');
         return;
       }
+      pickedUri = uri;
       setPhotoUploading(true);
       const uploadedUrl = await uploadPhotoAsync(uri, asset?.mimeType);
       setProfileDraft((prev) => ({ ...prev, photo_url: uploadedUrl }));
@@ -457,7 +495,15 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
           : 'Photo selected. It will be saved with your profile.',
       );
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'Photo pick failed.');
+      const message = error instanceof Error ? error.message : 'Photo pick failed.';
+      // No internet/DNS on the device: keep the photo locally so Save Profile
+      // still works, and say so plainly instead of a native stack trace.
+      if (pickedUri && /resolve host|no address|network|timed out|timeout|eai_again|enotfound|unreachable/i.test(message)) {
+        setProfileDraft((prev) => ({ ...prev, photo_url: pickedUri as string }));
+        setInfoText('No internet — photo kept locally. Re-pick when online to upload.');
+      } else {
+        setErrorText(message);
+      }
     } finally {
       setPhotoUploading(false);
     }
@@ -535,9 +581,27 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
   return (
     <SafeAreaView style={s.container}>
       <Surface style={[s.headerRow, { paddingTop: topInset + SPACING.s }]}>
+        <Pressable
+          onPress={() => setTab('profile')}
+          hitSlop={HIT_SLOP}
+          accessibilityRole="imagebutton"
+          accessibilityLabel="Open profile"
+          style={s.avatarButton}
+        >
+          {avatarUri && !avatarFailed ? (
+            <Image
+              source={{ uri: avatarUri }}
+              style={s.avatarImage}
+              onError={() => setAvatarFailed(true)}
+              accessibilityLabel="Open profile"
+            />
+          ) : (
+            <Ionicons name="person-circle" size={48} color={COLOR.accent} />
+          )}
+        </Pressable>
         <View style={s.headerTextWrap}>
-          <Text style={s.heading}>Hello, {profile?.name || user.name}</Text>
-          <Text style={s.subHeading}>{profile?.patient_code || 'Patient dashboard'}</Text>
+          <Text style={s.heading} numberOfLines={1} ellipsizeMode="tail">Hello, {profile?.name || user.name}</Text>
+          <Text style={s.subHeading} numberOfLines={1} ellipsizeMode="tail">{profile?.patient_code || 'Patient dashboard'}</Text>
         </View>
         <Button mode="contained" onPress={onLogout} style={s.logoutBtn} labelStyle={s.logoutText} contentStyle={s.btnContent} hitSlop={HIT_SLOP}>
           Log out
@@ -560,27 +624,27 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
 
         {tab === 'home' && (
           <>
-            <Card style={s.card}>
+            <Card style={s.heroCard}>
               <Card.Content>
-                <Text style={s.cardLabel}>Next Appointment</Text>
+                <Text style={s.heroEyebrow}>Next Visit</Text>
                 {nextAppointment ? (
                   <>
-                    <Text style={s.cardTitle}>{formatDate(nextAppointment)}</Text>
-                    <Text style={s.cardMeta}>Doctor: {nextAppointment.doctor_name || 'Assigned doctor'}</Text>
+                    <Text style={s.heroTitle}>{formatDate(nextAppointment)}</Text>
+                    <Text style={s.heroMeta}>{nextAppointment.doctor_name || 'Assigned doctor'}</Text>
                     <View style={s.metaRow}>
-                      <Chip compact style={s.metaChip}>
+                      <Chip compact style={s.heroChip} textStyle={s.heroChipText}>
                         Token #{nextAppointment.token_number || '-'}
                       </Chip>
-                      <Chip compact style={s.metaChip}>
+                      <Chip compact style={s.heroChip} textStyle={s.heroChipText}>
                         {nextAppointment.status}
                       </Chip>
                     </View>
                     <Button
                       mode="contained"
                       onPress={() => setTab('records')}
-                      style={s.primaryBtn}
+                      style={s.heroBtn}
                       contentStyle={s.btnContent}
-                      labelStyle={s.primaryBtnText}
+                      labelStyle={s.heroBtnText}
                       hitSlop={HIT_SLOP}
                     >
                       View Details
@@ -588,13 +652,14 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                   </>
                 ) : (
                   <>
-                    <Text style={s.cardMeta}>No upcoming appointments.</Text>
+                    <Text style={s.heroTitle}>No upcoming visits</Text>
+                    <Text style={s.heroMeta}>Book a time that suits you.</Text>
                     <Button
                       mode="contained"
                       onPress={() => setTab('book')}
-                      style={s.primaryBtn}
+                      style={s.heroBtn}
                       contentStyle={s.btnContent}
-                      labelStyle={s.primaryBtnText}
+                      labelStyle={s.heroBtnText}
                       hitSlop={HIT_SLOP}
                     >
                       Book Your Visit
@@ -603,67 +668,111 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                 )}
               </Card.Content>
             </Card>
-            <View style={s.statsRow}>
-              <Surface style={s.statCard} elevation={1}>
-                <Text style={s.statNumber}>{upcomingCount}</Text>
-                <Text style={s.statLabel}>Upcoming</Text>
-              </Surface>
-              <Surface style={s.statCard} elevation={1}>
-                <Text style={s.statNumber}>{prescriptions.length}</Text>
-                <Text style={s.statLabel}>Prescriptions</Text>
-              </Surface>
-              <Surface style={s.statCard} elevation={1}>
-                <Text style={s.statNumber}>{pendingBills}</Text>
-                <Text style={s.statLabel}>Bills Due</Text>
-              </Surface>
-            </View>
-            <View style={s.actionGrid}>
-              <Button
-                mode="outlined"
-                onPress={() => setTab('records')}
-                style={[s.secondaryBtn, s.gridBtn]}
-                contentStyle={s.btnContent}
-                labelStyle={s.secondaryBtnText}
-                hitSlop={HIT_SLOP}
-              >
-                Records
-              </Button>
-              <Button
-                mode="outlined"
-                onPress={() => setTab('profile')}
-                style={[s.secondaryBtn, s.gridBtn]}
-                contentStyle={s.btnContent}
-                labelStyle={s.secondaryBtnText}
-                hitSlop={HIT_SLOP}
-              >
-                Profile
-              </Button>
-              <Button
-                mode="outlined"
-                onPress={() => setTab('clinic')}
-                style={[s.secondaryBtn, s.gridBtn]}
-                contentStyle={s.btnContent}
-                labelStyle={s.secondaryBtnText}
-                hitSlop={HIT_SLOP}
-              >
-                Clinic
-              </Button>
-              <Button
-                mode="outlined"
-                icon="phone"
-                onPress={() => {
-                  Linking.openURL(`tel:${CLINIC_DETAILS.mobile}`).catch(() =>
-                    setErrorText(`Could not open dialer. Call ${CLINIC_DETAILS.mobile}`),
-                  );
-                }}
-                style={[s.secondaryBtn, s.gridBtn]}
-                contentStyle={s.btnContent}
-                labelStyle={s.secondaryBtnText}
-                hitSlop={HIT_SLOP}
-              >
-                Call
-              </Button>
-            </View>
+            {(unpaidTotal > 0 || profileGaps.length > 0) && (
+              <Card style={s.card}>
+                <Card.Content>
+                  <Text style={s.cardLabel}>Needs Your Attention</Text>
+                  {unpaidTotal > 0 && (
+                    <TouchableOpacity onPress={() => setTab('records')} hitSlop={HIT_SLOP}>
+                      <View style={s.attentionRow}>
+                        <Ionicons name="receipt-outline" size={22} color={COLOR.primary} />
+                        <View style={s.attentionText}>
+                          <Text style={s.rowTitle}>
+                            Rs {unpaidTotal.toFixed(2)} due across {pendingBills} bill{pendingBills === 1 ? '' : 's'}
+                          </Text>
+                          <Text style={s.rowMeta}>Tap to view invoices</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color={COLOR.accent} />
+                      </View>
+                    </TouchableOpacity>
+                  )}
+                  {profileGaps.length > 0 && (
+                    <TouchableOpacity onPress={() => setTab('profile')} hitSlop={HIT_SLOP}>
+                      <View style={s.attentionRow}>
+                        <Ionicons name="person-outline" size={22} color={COLOR.primary} />
+                        <View style={s.attentionText}>
+                          <Text style={s.rowTitle}>
+                            Profile missing: {profileGaps.join(', ')}
+                          </Text>
+                          <Text style={s.rowMeta}>Tap to complete</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color={COLOR.accent} />
+                      </View>
+                    </TouchableOpacity>
+                  )}
+                </Card.Content>
+              </Card>
+            )}
+            {unpaidTotal <= 0 && profileGaps.length === 0 && (
+              <Card style={s.card}>
+                <Card.Content>
+                  <Text style={s.cardLabel}>You&apos;re All Set</Text>
+                  <Text style={s.cardMeta}>
+                    No pending bills or missing details. We&apos;ll remind you here when something needs you.
+                  </Text>
+                </Card.Content>
+              </Card>
+            )}
+            {hasVitals && (
+              <Card style={s.card}>
+                <Card.Content>
+                  <Text style={s.cardLabel}>Health Snapshot</Text>
+                  <View style={s.vitalsGrid}>
+                    {!!profile?.bp && (
+                      <View style={s.vitalTile}>
+                        <Text style={s.vitalValue}>{profile.bp}</Text>
+                        <Text style={s.vitalLabel}>BP</Text>
+                      </View>
+                    )}
+                    {profile?.spo2 != null && (
+                      <View style={s.vitalTile}>
+                        <Text style={s.vitalValue}>{profile.spo2}%</Text>
+                        <Text style={s.vitalLabel}>SpO2</Text>
+                      </View>
+                    )}
+                    {!!profile?.height_cm && (
+                      <View style={s.vitalTile}>
+                        <Text style={s.vitalValue}>{profile.height_cm} cm</Text>
+                        <Text style={s.vitalLabel}>Height</Text>
+                      </View>
+                    )}
+                    {!!profile?.weight_kg && (
+                      <View style={s.vitalTile}>
+                        <Text style={s.vitalValue}>{profile.weight_kg} kg</Text>
+                        <Text style={s.vitalLabel}>Weight</Text>
+                      </View>
+                    )}
+                  </View>
+                </Card.Content>
+              </Card>
+            )}
+            <Card style={s.card}>
+              <Card.Content>
+                <Text style={s.cardLabel}>Latest Prescription</Text>
+                {latestRx ? (
+                  <TouchableOpacity
+                    onPress={() => navigation.navigate('PrescriptionDetail', { prescription: latestRx })}
+                    hitSlop={HIT_SLOP}
+                  >
+                    <View style={s.attentionRow}>
+                      <Ionicons name="document-text-outline" size={22} color={COLOR.primary} />
+                      <View style={s.attentionText}>
+                        <Text style={s.rowTitle}>{latestRx.doctor_name || 'Doctor'}</Text>
+                        <Text style={s.rowMeta}>
+                          {[latestRx.prescribed_on ? new Date(latestRx.prescribed_on).toLocaleDateString() : '',
+                            latestRx.items.map((i) => i.medicine_name).join(', ') || 'No items']
+                            .filter(Boolean).join(' • ')}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={20} color={COLOR.accent} />
+                    </View>
+                  </TouchableOpacity>
+                ) : (
+                  <Text style={s.cardMeta}>No prescriptions yet.</Text>
+                )}
+              </Card.Content>
+            </Card>
+            
           </>
         )}
 
@@ -971,38 +1080,95 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
 
         {tab === 'clinic' && (
           <>
-            <Card style={s.card}>
+            <Card style={s.heroCard} accessibilityLabel="Clinic information">
               <Card.Content>
-                <Text style={s.cardTitle}>About the Clinic</Text>
-                <Text style={s.rowTitle}>{CLINIC_DETAILS.name}</Text>
-                <Text style={s.rowMeta}>{CLINIC_DETAILS.specialty}</Text>
-                <Text style={s.rowMeta}>Doctor: {CLINIC_DETAILS.doctor}</Text>
-                <Text style={s.rowMeta}>Address: {CLINIC_DETAILS.address}</Text>
-                <Text style={s.rowMeta}>Mobile: {CLINIC_DETAILS.mobile}</Text>
+                <Text style={s.heroEyebrow}>Our Clinic</Text>
+                <Text style={s.heroTitle}>{CLINIC_DETAILS.name}</Text>
+                <Text style={s.heroMeta}>{CLINIC_DETAILS.doctor}</Text>
+                <Text style={s.heroMeta}>{CLINIC_DETAILS.specialty}</Text>
+                <Text style={s.heroMeta}>{CLINIC_DETAILS.address}</Text>
+                <Pressable
+                  onPress={() => {
+                    Linking.openURL(`tel:${CLINIC_DETAILS.mobile}`).catch(() =>
+                      setErrorText(`Could not open dialer. Call ${CLINIC_DETAILS.mobile}`),
+                    );
+                  }}
+                  hitSlop={HIT_SLOP}
+                  accessibilityRole="link"
+                  accessibilityLabel={`Call clinic at ${CLINIC_DETAILS.mobile}`}
+                  style={({ pressed }) => [s.clinicPhoneRow, pressed && s.clinicPhonePressed]}
+                >
+                  <Ionicons name="call-outline" size={18} color={COLOR.surface} />
+                  <Text style={s.clinicPhoneText}>{CLINIC_DETAILS.mobile}</Text>
+                </Pressable>
               </Card.Content>
             </Card>
 
+            <View style={s.clinicActions}>
+              <Button
+                mode="contained"
+                onPress={() => {
+                  Linking.openURL(`tel:${CLINIC_DETAILS.mobile}`).catch(() =>
+                    setErrorText(`Could not open dialer. Call ${CLINIC_DETAILS.mobile}`),
+                  );
+                }}
+                style={[s.primaryBtn, s.clinicActionBtn]}
+                contentStyle={s.btnContent}
+                labelStyle={s.primaryBtnText}
+                hitSlop={HIT_SLOP}
+                accessibilityLabel={`Call clinic at ${CLINIC_DETAILS.mobile}`}
+              >
+                Call Clinic
+              </Button>
+              <Button
+                mode="outlined"
+                onPress={() => {
+                  const query = encodeURIComponent(CLINIC_DETAILS.address);
+                  Linking.openURL(
+                    `https://www.google.com/maps/search/?api=1&query=${query}`,
+                  ).catch(() => setErrorText('Could not open maps. Please try again.'));
+                }}
+                style={[s.secondaryBtn, s.clinicActionBtn]}
+                contentStyle={s.btnContent}
+                labelStyle={s.secondaryBtnText}
+                hitSlop={HIT_SLOP}
+                accessibilityRole="link"
+                accessibilityLabel={`Get directions to ${CLINIC_DETAILS.name}`}
+              >
+                Get Directions
+              </Button>
+            </View>
+
+            <SectionCard title="Visiting Hours">
+              <View style={s.clinicInfoRow}>
+                <Ionicons name="time-outline" size={20} color={COLOR.primary} />
+                <Text style={[s.rowMeta, s.clinicInfoText]}>
+                  Call ahead to confirm today&apos;s timings.
+                </Text>
+              </View>
+            </SectionCard>
+
             <SectionCard title="Why Patients Choose Us">
-              <InfoList items={CLINIC_HIGHLIGHTS} />
+              <InfoList items={CLINIC_HIGHLIGHTS} icon="heart-outline" />
             </SectionCard>
 
             <SectionCard title="How to Use This App">
-              <InfoList items={HOW_TO_USE} />
+              <InfoList items={HOW_TO_USE} icon="phone-outline" />
             </SectionCard>
 
             <SectionCard title="Before You Visit">
-              <InfoList items={BEFORE_VISIT} />
+              <InfoList items={BEFORE_VISIT} icon="location-outline" />
             </SectionCard>
           </>
         )}
       </ScrollView>
 
       <View style={s.bottomTabs}>
-        <Tab label="Home" active={tab === 'home'} onPress={() => setTab('home')} />
-        <Tab label="Book" active={tab === 'book'} onPress={() => setTab('book')} />
-        <Tab label="Records" active={tab === 'records'} onPress={() => setTab('records')} />
-        <Tab label="Profile" active={tab === 'profile'} onPress={() => setTab('profile')} />
-        <Tab label="Clinic" active={tab === 'clinic'} onPress={() => setTab('clinic')} />
+        <Tab tab="home" label="Home" active={tab === 'home'} onPress={() => setTab('home')} />
+        <Tab tab="book" label="Book" active={tab === 'book'} onPress={() => setTab('book')} />
+        <Tab tab="records" label="Records" active={tab === 'records'} onPress={() => setTab('records')} />
+        <Tab tab="profile" label="Profile" active={tab === 'profile'} onPress={() => setTab('profile')} />
+        <Tab tab="clinic" label="Clinic" active={tab === 'clinic'} onPress={() => setTab('clinic')} />
       </View>
 
       <Modal visible={showBookModal} transparent animationType="slide">
@@ -1093,17 +1259,30 @@ function SectionCard({ title, children }: { title: string; children: React.React
   );
 }
 
-function InfoList({ items }: { items: string[] }) {
+function InfoList({ items, icon }: { items: string[]; icon?: string }) {
   return (
     <View>
       {items.map((item) => (
-        <Text key={item} style={s.rowMeta}>{`- ${item}`}</Text>
+        <View key={item} style={s.clinicInfoRow}>
+          {icon ? <Ionicons name={icon as any} size={20} color={COLOR.primary} /> : null}
+          <Text style={[s.rowMeta, icon && s.clinicInfoText]}>{item}</Text>
+        </View>
       ))}
     </View>
   );
 }
 
-function Tab({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+// Minimal outline icons in theme tints: active = primary, inactive = accent.
+const TAB_ICONS: Record<TabKey, { off: string; on: string }> = {
+  home: { off: 'home-outline', on: 'home' },
+  book: { off: 'calendar-outline', on: 'calendar' },
+  records: { off: 'document-text-outline', on: 'document-text' },
+  profile: { off: 'person-outline', on: 'person' },
+  clinic: { off: 'business-outline', on: 'business' },
+};
+
+function Tab({ tab, label, active, onPress }: { tab: TabKey; label: string; active: boolean; onPress: () => void }) {
+  const tint = active ? COLOR.primary : COLOR.accent;
   return (
     <Pressable
       onPress={onPress}
@@ -1114,6 +1293,11 @@ function Tab({ label, active, onPress }: { label: string; active: boolean; onPre
       android_ripple={{ color: 'rgba(94,108,132,0.18)', borderless: false }}
       style={({ pressed }) => [s.tab, pressed && s.tabPressed]}
     >
+      <Ionicons
+        name={(active ? TAB_ICONS[tab].on : TAB_ICONS[tab].off) as any}
+        size={22}
+        color={tint}
+      />
       <Text style={[s.tabText, active && s.tabActive]}>{label}</Text>
     </Pressable>
   );
@@ -1160,6 +1344,15 @@ const s = StyleSheet.create({
     alignItems: 'center',
   },
   headerTextWrap: { flex: 1, paddingRight: SPACING.s },
+  avatarButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: SPACING.s,
+  },
+  avatarImage: { width: 48, height: 48, borderRadius: 24, backgroundColor: COLOR.background },
   heading: { color: COLOR.text, fontFamily: FONT.bold, fontSize: 24 },
   subHeading: { color: COLOR.primary, fontFamily: FONT.medium, fontSize: 14, marginTop: SPACING.xs },
   logoutBtn: {
@@ -1186,18 +1379,80 @@ const s = StyleSheet.create({
   quickActions: { flexDirection: 'column', gap: SPACING.s, marginBottom: SPACING.m },
   metaRow: { flexDirection: 'row', gap: SPACING.s, marginVertical: SPACING.s },
   metaChip: { backgroundColor: COLOR.background },
-  statsRow: { flexDirection: 'row', gap: SPACING.s, marginBottom: SPACING.m },
-  statCard: {
-    flex: 1,
+  heroCard: {
+    backgroundColor: COLOR.primary,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.l,
+    marginBottom: SPACING.m,
+    ...SHADOW.card,
+  },
+  heroEyebrow: { color: COLOR.accent, fontFamily: FONT.medium, fontSize: 12, letterSpacing: 2, marginBottom: SPACING.s },
+  heroTitle: { color: COLOR.surface, fontFamily: FONT.bold, fontSize: 22, marginBottom: SPACING.xs },
+  heroMeta: { color: COLOR.surface, opacity: 0.85, fontFamily: FONT.regular, fontSize: 14, marginBottom: SPACING.xs },
+  heroChip: { backgroundColor: COLOR.surface },
+  heroChipText: { color: COLOR.primary, fontFamily: FONT.medium },
+  heroBtn: {
     backgroundColor: COLOR.surface,
+    borderRadius: RADIUS.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: SPACING.s,
+  },
+  heroBtnText: { color: COLOR.primary, fontFamily: FONT.bold, fontSize: 15 },
+  attentionRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.m, paddingVertical: SPACING.s },
+  attentionText: { flex: 1 },
+  callStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.m,
+    backgroundColor: COLOR.surface,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.m,
+    marginBottom: SPACING.m,
+  },
+  callIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLOR.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callBtn: {
+    backgroundColor: COLOR.primary,
+    borderRadius: RADIUS.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clinicPhoneRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.s,
+    marginTop: SPACING.s,
+    paddingVertical: SPACING.s,
+  },
+  clinicPhonePressed: { opacity: 0.8 },
+  clinicPhoneText: { color: COLOR.surface, fontFamily: FONT.bold, fontSize: 16 },
+  clinicActions: { flexDirection: 'row', gap: SPACING.s, marginBottom: SPACING.m },
+  clinicActionBtn: { flex: 1, marginTop: 0 },
+  clinicInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.s,
+    paddingVertical: SPACING.xs,
+  },
+  clinicInfoText: { flex: 1, marginTop: 0 },
+  vitalsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.s, marginBottom: SPACING.s },
+  vitalTile: {
+    flexBasis: '48%',
+    flexGrow: 1,
+    backgroundColor: COLOR.background,
     borderRadius: RADIUS.md,
     paddingVertical: SPACING.m,
     alignItems: 'center',
   },
-  statNumber: { color: COLOR.text, fontFamily: FONT.bold, fontSize: 22 },
-  statLabel: { color: COLOR.primary, fontFamily: FONT.medium, fontSize: 12, marginTop: 2 },
-  actionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.s, marginBottom: SPACING.m },
-  gridBtn: { flexBasis: '48%', flexGrow: 1 },
+  vitalValue: { color: COLOR.text, fontFamily: FONT.bold, fontSize: 18 },
+  vitalLabel: { color: COLOR.primary, fontFamily: FONT.medium, fontSize: 12, marginTop: 2 },
   btnContent: { minHeight: 48, paddingVertical: 6 },
   primaryBtn: {
     backgroundColor: COLOR.primary,
@@ -1272,10 +1527,10 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     ...SHADOW.card,
   },
-  tab: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 12, paddingHorizontal: 4, borderRadius: RADIUS.md },
+  tab: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 10, paddingHorizontal: 4, borderRadius: RADIUS.md, gap: 2 },
   tabPressed: { opacity: 0.7, backgroundColor: 'rgba(94,108,132,0.12)' },
-  tabText: { color: COLOR.primary, fontFamily: FONT.medium, fontSize: 12 },
-  tabActive: { color: COLOR.text, fontFamily: FONT.bold },
+  tabText: { color: COLOR.accent, fontFamily: FONT.medium, fontSize: 11 },
+  tabActive: { color: COLOR.primary, fontFamily: FONT.bold },
   infoText: {
     color: COLOR.success,
     fontFamily: FONT.medium,

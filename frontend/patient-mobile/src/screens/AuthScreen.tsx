@@ -11,9 +11,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as WebBrowser from 'expo-web-browser';
-import * as AuthSession from 'expo-auth-session';
-import * as Google from 'expo-auth-session/providers/google';
-import { API_BASE_URL, GOOGLE_AUTH_CONFIG, isGoogleConfigured } from '../config/api';
+import * as Linking from 'expo-linking';
+import { API_BASE_URL } from '../config/api';
 import { COLOR, FONT, RADIUS, SHADOW, SPACING } from '../../theme';
 import type { Session, User } from '../utils/sessionTypes';
 
@@ -29,7 +28,8 @@ function asSession(payload: any): Session {
   const user = payload?.user as User;
   const token = String(payload?.token ?? '');
   if (!token || !user) throw new Error('Invalid login response from server.');
-  return { token, user };
+  const refreshToken = payload?.refreshToken ? String(payload.refreshToken) : undefined;
+  return refreshToken ? { token, refreshToken, user } : { token, user };
 }
 
 export default function AuthScreen({ onLoginSuccess }: Props) {
@@ -46,22 +46,8 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [googleError, setGoogleError] = useState('');
 
-  const googleConfigured = isGoogleConfigured();
-
-  // When OAuth IDs are not set yet, pass a placeholder so useAuthRequest
-  // does not throw ("Client Id must be defined"). signInWithGoogle
-  // early-returns with a hint in that case; password login always works.
-  const placeholderId = 'not-configured.apps.googleusercontent.com';
-  const [googleRequest, googleResponse, googlePromptAsync] = Google.useAuthRequest({
-    androidClientId: GOOGLE_AUTH_CONFIG.androidClientId || placeholderId,
-    clientId: GOOGLE_AUTH_CONFIG.expoClientId || placeholderId,
-    webClientId: GOOGLE_AUTH_CONFIG.webClientId || placeholderId,
-    iosClientId: GOOGLE_AUTH_CONFIG.iosClientId || placeholderId,
-    scopes: ['openid', 'profile', 'email'],
-    responseType: AuthSession.ResponseType.IdToken,
-    extraParams: { prompt: 'select_account' },
-  });
-
+  // Backend-mediated Google OAuth: the app never talks to Google directly,
+  // so Google never sees an exp:// redirect (which it blocks with 400).
   const canSubmit = useMemo(() => {
     if (mode === 'register') return !!name.trim() && !!email.trim() && !!password.trim();
     if (mode === 'verify') return !!email.trim() && !!code.trim();
@@ -72,69 +58,67 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
     return !!email.trim() && !!password.trim();
   }, [code, email, forgotSent, mode, name, newPassword, password]);
 
-  // Handle the Google redirect exactly once per response.
-  useEffect(() => {
-    if (!googleResponse) return;
-    if (googleResponse.type === 'dismiss' || googleResponse.type === 'cancel') {
-      setIsGoogleLoading(false);
-      return;
+  const handleDeepLink = (url: string | null | undefined) => {
+    if (!url) return false;
+    let parsed: any = null;
+    try {
+      parsed = Linking.parse(url);
+    } catch {
+      return false;
     }
-    if (googleResponse.type === 'error') {
+    const path = String(parsed?.path ?? '');
+    // Only handle our auth return (patient-mobile://auth or exp://.../--/auth).
+    if (!path.startsWith('auth') && !url.includes('auth?') && !url.includes('auth&')) return false;
+    const qp = (parsed?.queryParams ?? {}) as Record<string, any>;
+    if (qp.error) {
       setIsGoogleLoading(false);
-      setGoogleError(
-        (googleResponse as any)?.error?.message ??
-          'Google sign-in failed. Please try again.',
-      );
-      return;
+      setGoogleError(String(qp.error));
+      return true;
     }
-    if (googleResponse.type !== 'success') return;
-
-    const params = (googleResponse as any)?.params ?? {};
-    const authentication = (googleResponse as any)?.authentication ?? {};
-    const idToken: string | undefined =
-      params.id_token ?? authentication.idToken ?? undefined;
-
-    if (!idToken) {
-      setIsGoogleLoading(false);
-      setGoogleError('Google did not return an ID token. Try password login.');
-      return;
-    }
-
-    let cancelled = false;
-    (async () => {
+    if (qp.token) {
+      const token = String(qp.token);
+      const refreshToken = qp.refresh ? String(qp.refresh) : undefined;
+      const user = {
+        id: Number(qp.id) || 0,
+        name: String(qp.name ?? 'Patient'),
+        email: String(qp.email ?? ''),
+        role: (qp.role ?? 'patient') as User['role'],
+      };
+      if (!token || !user.id || !user.email) {
+        setIsGoogleLoading(false);
+        setGoogleError('Google login returned an incomplete response.');
+        return true;
+      }
       setGoogleError('');
       setErrorText('');
+      setIsGoogleLoading(false);
+      onLoginSuccess(refreshToken ? { token, refreshToken, user } : { token, user });
+      return true;
+    }
+    return false;
+  };
+
+  // Listen for the backend -> app redirect (patient-mobile://auth?... or exp://...).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/auth/google`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idToken }),
-        });
-        const payload = await safeJson(res);
-        if (!res.ok) throw new Error(payload?.error ?? 'Google login failed.');
-        if (!cancelled) onLoginSuccess(asSession(payload));
-      } catch (error) {
-        if (!cancelled) {
-          const message =
-            error instanceof Error ? error.message : 'Google login failed.';
-          // Distinguish offline from server rejection.
-          setGoogleError(
-            message.includes('Network request failed') ||
-              message.includes('Cannot reach')
-              ? 'Cannot reach the server. Check your connection and API URL.'
-              : message,
-          );
-        }
-      } finally {
-        if (!cancelled) setIsGoogleLoading(false);
+        const initial = await Linking.getInitialURL();
+        if (!cancelled && initial) handleDeepLink(initial);
+      } catch {
+        // ignore
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    const sub = Linking.addEventListener('url', ({ url }) => {
+      handleDeepLink(url);
+    });
     // onLoginSuccess is stable from App (useCallback); safe to omit from deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [googleResponse]);
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
+  }, []);
 
   const submit = async () => {
     if (!canSubmit || isLoading) return;
@@ -271,24 +255,33 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
     if (isGoogleLoading || isLoading) return;
     setGoogleError('');
     setErrorText('');
-    if (!googleConfigured) {
-      setGoogleError(
-        'Google sign-in is not configured. Add EXPO_PUBLIC_GOOGLE_* IDs in .env.',
-      );
-      return;
-    }
-    if (!googleRequest) {
-      setGoogleError('Google sign-in is still loading. Try again in a moment.');
-      return;
-    }
     setIsGoogleLoading(true);
     try {
-      await googlePromptAsync();
-      // Result is handled by the effect above; the loading flag is cleared there.
+      // Deep link the backend should return to. In Expo Go this is
+      // exp://192.168.x.x:8081/--/auth; in a build it is patient-mobile://auth.
+      // Google never sees this — only the backend does.
+      const returnUrl = Linking.createURL('auth');
+      const startUrl =
+        `${API_BASE_URL}/auth/google/start?redirect=${encodeURIComponent(returnUrl)}`;
+      console.log(`[google] backend-oauth start platform=${Platform.OS}`);
+      const result = await WebBrowser.openBrowserAsync(startUrl);
+      // iOS/Android dismiss without a Linking event = user cancelled.
+      if (result.type === 'dismiss' || result.type === 'cancel') {
+        setIsGoogleLoading(false);
+      }
+      // On web, openBrowserAsync may return the final redirect URL directly.
+      const finalUrl = (result as any)?.url as string | undefined;
+      if (finalUrl && handleDeepLink(finalUrl)) return;
+      // Otherwise the Linking listener above completes the login.
+      // Fallback: clear spinner after 60s so it never sticks.
+      setTimeout(() => setIsGoogleLoading((v) => (v ? false : v)), 60000);
     } catch (error) {
       setIsGoogleLoading(false);
+      const message = error instanceof Error ? error.message : 'Google sign-in failed.';
       setGoogleError(
-        error instanceof Error ? error.message : 'Google sign-in failed.',
+        message.includes('Network request failed')
+          ? 'Cannot reach the server. Check your connection and API URL.'
+          : message,
       );
     }
   };
@@ -464,9 +457,9 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
                   <View style={s.dividerLine} />
                 </View>
                 <TouchableOpacity
-                  style={[s.googleBtn, (busy || !googleConfigured) && s.primaryBtnDisabled]}
+                  style={[s.googleBtn, busy && s.primaryBtnDisabled]}
                   onPress={signInWithGoogle}
-                  disabled={busy || !googleConfigured || !googleRequest}
+                  disabled={busy}
                 >
                   {isGoogleLoading ? (
                     <ActivityIndicator color={COLOR.primary} />
@@ -474,12 +467,6 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
                     <Text style={s.googleBtnText}>Continue with Google</Text>
                   )}
                 </TouchableOpacity>
-                {!googleConfigured && (
-                  <Text style={s.hintText}>
-                    Google sign-in needs EXPO_PUBLIC_GOOGLE_* IDs. Password login works
-                    without them.
-                  </Text>
-                )}
               </>
             )}
 

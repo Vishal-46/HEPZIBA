@@ -14,17 +14,24 @@ The repository is structured as a monorepo containing the following key componen
 - `PROJECT_STATUS_REPORT.md`: A detailed report on the current development progress, feature completion matrix, and technical debt.
 
 ## Tech Stack
-- **Backend:** Node.js, Express.js, PostgreSQL (with `pg` driver), JSON Web Tokens (JWT) for authentication, `bcrypt` for password hashing.
+- **Backend:** Node.js, Express.js, PostgreSQL (Supabase pooler via `pg`), JSON Web Tokens (JWT) for authentication, `bcrypt` for password hashing, Resend for email. Deployed serverless on **Vercel** (`backend/` mirrors to [hepziba-backend](https://github.com/Vishal-46/hepziba-backend)).
 - **Web Frontend:** React, Vite, React Router, React Query, Axios.
-- **Mobile Frontend:** React Native, Expo, React Navigation, React Native Paper.
+- **Mobile Frontend:** React Native, Expo, React Navigation, React Native Paper, `expo-secure-store` for token storage.
 - **Database:** PostgreSQL.
 
+## Authentication & Sessions
+- **Password + Google OAuth:** patients use email/password (with email OTP verification) or Continue with Google. Staff (doctor/admin) use email/password.
+- **Backend-mediated Google OAuth (no Expo proxy):** the app opens `GET /auth/google/start`; Google redirects to the backend callback (`/auth/google/callback`); the backend verifies the `id_token`, creates/finds the patient, and redirects to the app deep link (`patient-mobile://auth`, or `exp://…` in Expo Go dev). Google only ever sees the backend HTTPS URL, so no frontend client IDs or Expo account are needed — one **Web** OAuth client in Google Cloud Console.
+- **Sessions:** short-lived access JWT (15m, `ACCESS_TOKEN_TTL`, carries `jti`+role) + rotating opaque refresh tokens (30d, `REFRESH_TOKEN_DAYS`, SHA-256 hashed in `refresh_tokens`). `POST /auth/refresh` rotates with reuse detection (reused token kills the whole family). `POST /auth/logout` revokes the refresh token and denylists the access `jti` until expiry; `POST /auth/logout-all` kills every session. `roleAuth` checks signature → denylist → live user row (active + current role).
+- **Clients:** both apps refresh silently on 401 (single-flight) and call server logout on sign-out. Mobile stores tokens in SecureStore; web in localStorage.
+- **Public legal pages** (required for Google OAuth publishing): `GET /`, `/privacy`, `/terms` on the backend host.
+
 ## Core Features (Current Status)
-- **Authentication & Roles:** JWT-based Role-Based Access Control (RBAC) with 'patient', 'doctor', and 'admin' roles. *(Partially Working)*
-- **Patient Registration & Profiles:** Managing patient details, medical history, and contact info. *(Partially Working)*
-- **Appointment Management:** Scheduling and tracking patient appointments. *(Partially Working)*
-- **Electronic Health Records (EHR):** Digital management of patient medical data. *(Partially Working)*
-- **Billing/Invoicing, Inventory, Prescriptions:** *(Pending/Stubbed)*
+- **Authentication & Roles:** JWT + refresh rotation with 'patient', 'doctor', and 'admin' RBAC. *(Working)*
+- **Patient Registration & Profiles:** Managing patient details, medical history, and contact info. *(Working)*
+- **Appointment Management:** Scheduling and tracking patient appointments. *(Working)*
+- **Electronic Health Records (EHR):** Digital management of patient medical data. *(Working)*
+- **Billing/Invoicing, Inventory, Prescriptions:** *(Working — see `PROJECT_STATUS_REPORT.md`)*
 
 ## Getting Started
 
@@ -35,19 +42,26 @@ The repository is structured as a monorepo containing the following key componen
 
 ### 1. Database Setup
 1. Create a PostgreSQL database for the project.
-2. Apply migrations in order (all idempotent; re-running `002` is safe):
+2. Apply migrations in order (all idempotent; re-running is safe):
    ```bash
    psql -U your_username -d your_database_name -f hepziba_schema.sql
    psql -U your_username -d your_database_name -f backend/sql/001_hospital_alignment.sql
    psql -U your_username -d your_database_name -f backend/sql/002_fix_doctors_and_constraints.sql
+   psql -U your_username -d your_database_name -f backend/sql/005_session_tokens.sql
    ```
-   This sets up `users`, `patients`, `doctors`, `appointments`, plus prescriptions/billing/inventory tables. Note: on a fresh DB, `001` may stop at `prescriptions` with `relation "doctors" does not exist` (it references `doctors` before it exists); `002` creates `doctors` and any missing tables, so just continue to `002`. See `db-schema.md` and `backend/sql/README.md` for details and verification steps.
+   This sets up `users`, `patients`, `doctors`, `appointments`, plus prescriptions/billing/inventory tables, then `refresh_tokens` + `revoked_access_tokens` for sessions. Note: on a fresh DB, `001` may stop at `prescriptions` with `relation "doctors" does not exist` (it references `doctors` before it exists); `002` creates `doctors` and any missing tables, so just continue to `002`. See `db-schema.md` and `backend/sql/README.md` for details and verification steps.
 
 ### 2. Backend Setup
 1. Navigate to the backend directory: `cd backend`
 2. Install dependencies: `npm install`
-3. Set up your environment variables by copying `.env.example` to `.env` and configuring your database credentials and JWT secrets.
+3. Set up your environment variables by copying `.env.example` to `.env` and configuring database credentials, JWT secret, Google OAuth (`GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI`), and email (Resend/SMTP).
 4. Run the development server: `npm run dev`
+5. Deploy: push `backend/` to the [hepziba-backend](https://github.com/Vishal-46/hepziba-backend) repo (Vercel project root = repo root); set the same env vars in Vercel and redeploy. Live API: `https://hepziba-backend.vercel.app` (`/health`).
+
+### Google OAuth Setup (one Web client)
+1. Google Cloud Console → one **Web application** OAuth client.
+2. Authorized JavaScript origin: `https://hepziba-backend.vercel.app`; Authorized redirect URI: `https://hepziba-backend.vercel.app/auth/google/callback` (must exactly match `GOOGLE_REDIRECT_URI`).
+3. Consent screen → add `https://hepziba-backend.vercel.app/`, `/privacy`, `/terms` as home/privacy/terms links, then Publish so any Gmail can sign in (Testing mode = test users only).
 
 ### 3. Web Admin Panel Setup
 1. Navigate to the web frontend: `cd frontend/doctor-admin-web`
@@ -57,7 +71,9 @@ The repository is structured as a monorepo containing the following key componen
 ### 4. Patient Mobile App Setup
 1. Navigate to the mobile frontend: `cd frontend/patient-mobile`
 2. Install dependencies: `npm install`
-3. Start the Expo server: `npm start` (Use the Expo Go app on your phone or an emulator to preview).
+3. Set `EXPO_PUBLIC_API_URL` in `.env` (LAN IP for local backend, or `https://hepziba-backend.vercel.app` — Google login requires the hosted backend).
+4. Start the Expo server: `npx expo start -c` (Use the Expo Go app on your phone or an emulator to preview).
+5. Production test build (APK): `eas build -p android --profile preview` (API URL is baked in at build time, so rebuild after `.env` changes).
 
 ## Current Development Tasks
 Refer to the `PROJECT_STATUS_REPORT.md` for immediate action items, which currently include locating the Doctor-Admin UI (now found!), verifying DB implementations, auditing code for validation/errors, and planning the deployment strategy.

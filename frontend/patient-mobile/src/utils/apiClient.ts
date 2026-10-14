@@ -29,6 +29,12 @@ export type ApiClientOptions = {
   onUnauthorized?: () => void;
   /** Per-request timeout in ms (default 15000). */
   timeoutMs?: number;
+  /**
+   * Refresh the access token (single-flight). Return the new Bearer token,
+   * or null when refresh is unavailable/failed. The failed request is then
+   * retried exactly once with the new token before surfacing a 401.
+   */
+  refreshAccess?: () => Promise<string | null>;
 };
 
 export type RequestOptions = Omit<RequestInit, 'body'> & {
@@ -80,8 +86,28 @@ async function resolveToken(
 
 export function createApiClient(clientOptions: ApiClientOptions = {}) {
   const defaultTimeout = clientOptions.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Single-flight refresh: concurrent 401s share one /auth/refresh call.
+  let inflightRefresh: Promise<string | null> | null = null;
+  const runRefresh = (): Promise<string | null> => {
+    if (!clientOptions.refreshAccess) return Promise.resolve(null);
+    if (!inflightRefresh) {
+      inflightRefresh = Promise.resolve()
+        .then(() => clientOptions.refreshAccess!())
+        .then(
+          (token) => {
+            inflightRefresh = null;
+            return token;
+          },
+          () => {
+            inflightRefresh = null;
+            return null;
+          },
+        );
+    }
+    return inflightRefresh;
+  };
 
-  async function request<T = any>(path: string, options: RequestOptions = {}): Promise<T> {
+  async function request<T = any>(path: string, options: RequestOptions = {}, retried = false): Promise<T> {
     const { json, token: tokenOverride, timeoutMs, headers, ...rest } = options;
     const token = await resolveToken(clientOptions, tokenOverride);
     const controller = new AbortController();
@@ -100,6 +126,11 @@ export function createApiClient(clientOptions: ApiClientOptions = {}) {
       });
 
       if (response.status === 401) {
+        // Transparent rotation: one refresh attempt, then exactly one retry.
+        if (!retried && tokenOverride === undefined) {
+          const fresh = await runRefresh();
+          if (fresh) return request<T>(path, { ...options, token: fresh }, true);
+        }
         clientOptions.onUnauthorized?.();
         const payload = await safeJson(response);
         const message =
@@ -140,19 +171,23 @@ export type RNApiClient = ReturnType<typeof createApiClient>;
 /** Shared singleton for screens that don't need their own 401 handler. */
 let sharedTokenProvider: TokenProvider | null = null;
 let sharedUnauthorizedHandler: (() => void) | null = null;
+let sharedRefreshAccess: (() => Promise<string | null>) | null = null;
 
 export function configureApiClient(options: {
   getToken?: TokenProvider;
   onUnauthorized?: () => void;
+  refreshAccess?: () => Promise<string | null>;
 }): void {
   if (options.getToken !== undefined) sharedTokenProvider = options.getToken;
   if (options.onUnauthorized !== undefined)
     sharedUnauthorizedHandler = options.onUnauthorized;
+  if (options.refreshAccess !== undefined) sharedRefreshAccess = options.refreshAccess;
 }
 
 const sharedClient = createApiClient({
   getToken: () => sharedTokenProvider?.() ?? null,
   onUnauthorized: () => sharedUnauthorizedHandler?.(),
+  refreshAccess: () => sharedRefreshAccess?.() ?? Promise.resolve(null),
 });
 
 /** Convenience wrappers that honour `configureApiClient`. */

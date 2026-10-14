@@ -29,13 +29,13 @@ export const GOOGLE_AUTH_CONFIG = {
   iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID ?? '',
 } as const;
 
+/**
+ * @deprecated Backend-mediated OAuth needs no frontend client IDs.
+ * Google only sees the backend redirect URI, so `exp://` is never sent to
+ * Google. Kept as a stub so old imports don't break.
+ */
 export function isGoogleConfigured(): boolean {
-  return Boolean(
-    GOOGLE_AUTH_CONFIG.androidClientId ||
-      GOOGLE_AUTH_CONFIG.expoClientId ||
-      GOOGLE_AUTH_CONFIG.webClientId ||
-      GOOGLE_AUTH_CONFIG.iosClientId,
-  );
+  return true;
 }
 
 /**

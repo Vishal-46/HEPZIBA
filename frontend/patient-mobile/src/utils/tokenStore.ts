@@ -11,6 +11,7 @@ import type { Session, User } from './sessionTypes';
 
 const TOKEN_KEY = 'hepziba.auth.token';
 const USER_KEY = 'hepziba.auth.user';
+const REFRESH_KEY = 'hepziba.auth.refresh';
 
 const memoryFallback = new Map<string, string>();
 
@@ -55,20 +56,24 @@ async function storeDelete(key: string): Promise<void> {
 }
 
 export async function saveSession(session: Session): Promise<void> {
-  await Promise.all([
+  const ops: Promise<void>[] = [
     storeSet(TOKEN_KEY, session.token),
     storeSet(USER_KEY, JSON.stringify(session.user)),
-  ]);
+  ];
+  if (session.refreshToken) ops.push(storeSet(REFRESH_KEY, session.refreshToken));
+  await Promise.all(ops);
   // Keep the in-memory copy warm so reads are synchronous-fast after login.
   memoryFallback.set(TOKEN_KEY, session.token);
   memoryFallback.set(USER_KEY, JSON.stringify(session.user));
+  if (session.refreshToken) memoryFallback.set(REFRESH_KEY, session.refreshToken);
 }
 
 export async function loadSession(): Promise<Session | null> {
   try {
-    const [token, rawUser] = await Promise.all([
+    const [token, rawUser, refreshToken] = await Promise.all([
       storeGet(TOKEN_KEY),
       storeGet(USER_KEY),
+      storeGet(REFRESH_KEY),
     ]);
     if (!token) return null;
     let user: User | null = null;
@@ -83,6 +88,7 @@ export async function loadSession(): Promise<Session | null> {
     // re-fetch /patients/me to hydrate. Keep a minimal placeholder.
     return {
       token,
+      ...(refreshToken ? { refreshToken } : {}),
       user: user ?? { id: 0, name: '', email: '', role: 'patient' as const },
     };
   } catch {
@@ -91,5 +97,5 @@ export async function loadSession(): Promise<Session | null> {
 }
 
 export async function clearSession(): Promise<void> {
-  await Promise.all([storeDelete(TOKEN_KEY), storeDelete(USER_KEY)]);
+  await Promise.all([storeDelete(TOKEN_KEY), storeDelete(USER_KEY), storeDelete(REFRESH_KEY)]);
 }
