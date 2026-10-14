@@ -50,3 +50,5 @@ docs/
 Thumbs.db
 .thumbs.dbrep/CLIENT_COMMUNICATION_STRATEGY.md
 rep/CLIENT_PRESENTATION_PLAN.md
+
+backend/pid.txt

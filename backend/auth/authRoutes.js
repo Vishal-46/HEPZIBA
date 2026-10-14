@@ -33,6 +33,12 @@ router.post('/google', loginLimiter, [
   body('idToken').notEmpty().isString().trim()
 ], validate, ctrl.googleLogin);
 
+// Google OAuth via backend (no Expo proxy / no frontend client IDs).
+// App opens GET /auth/google/start in a browser; Google redirects to the
+// backend callback, which finally redirects to the mobile deep link.
+router.get('/google/start', ctrl.startGoogleOAuth);
+router.get('/google/callback', ctrl.googleOAuthCallback);
+
 // Password reset (rate-limited: email-abuse + code-guessing protection)
 router.post('/forgot-password', forgotLimiter, [
   body('email').isEmail().normalizeEmail()

@@ -1,6 +1,7 @@
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const https = require('https');
+const crypto = require('crypto');
 const { hashPassword, checkPassword, generateCode, generateSecureToken } = require('../utils/crypto');
 const { sendMail } = require('../mailer/mailer');
 const { verificationEmail, passwordResetEmail } = require('../mailer/templates');
@@ -440,111 +441,289 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
-// --------- GOOGLE LOGIN ----------
+// --------- GOOGLE LOGIN (shared user find/create) ----------
+// Takes a verified Google tokeninfo payload, finds or creates the patient,
+// and returns { token, user }. Throws with .status for HTTP mapping.
+async function findOrCreatePatientFromGooglePayload(googlePayload) {
+  const normalizedEmail = String(googlePayload.email || '').trim().toLowerCase();
+  if (!normalizedEmail) {
+    const err = new Error('Email not found in Google token.');
+    err.status = 400;
+    throw err;
+  }
+
+  const existing = await pool.query('SELECT * FROM users WHERE email=$1', [normalizedEmail]);
+
+  if (existing.rows.length) {
+    const user = existing.rows[0];
+    if (!user.active) {
+      const err = new Error('Account deactivated.');
+      err.status = 401;
+      throw err;
+    }
+    if (user.role !== 'patient') {
+      const err = new Error('Account role not allowed.');
+      err.status = 403;
+      throw err;
+    }
+
+    if (!user.email_verified) {
+      await pool.query(
+        `UPDATE users
+         SET email_verified=TRUE, verification_code=NULL, verification_code_expires_at=NULL
+         WHERE id=$1`,
+        [user.id]
+      );
+    }
+
+    const patientExists = (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [user.id])).rowCount > 0;
+    if (!patientExists) {
+      const queryViaPool = (sql, params) => pool.query(sql, params);
+      const patientCode = await generateUniquePatientCode(queryViaPool);
+      try {
+        await pool.query(
+          `INSERT INTO patients (user_id, patient_code)
+           VALUES ($1, $2)`,
+          [user.id, patientCode]
+        );
+      } catch (patientInsertErr) {
+        if (!patientInsertErr || patientInsertErr.code !== '23505') throw patientInsertErr;
+        // Residual race — re-check before retrying:
+        // - user_id conflict (concurrent login created the row first):
+        //   the record now exists, so continue login without retrying.
+        // - patient_code conflict: regenerate once and retry the insert.
+        const nowExists =
+          (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [user.id])).rowCount > 0;
+        if (nowExists) {
+          // Concurrent creation won — nothing more to do.
+        } else if (isPatientCodeConflict(patientInsertErr)) {
+          const retryCode = await generateUniquePatientCode(queryViaPool);
+          await pool.query(
+            `INSERT INTO patients (user_id, patient_code)
+             VALUES ($1, $2)`,
+            [user.id, retryCode]
+          );
+        } else {
+          throw patientInsertErr;
+        }
+      }
+    }
+
+    const token = signToken(user);
+    return { token, user: { id: user.id, name: user.name, email: user.email, role: user.role } };
+  }
+
+  const name = String(googlePayload.name || googlePayload.given_name || 'Patient').trim();
+  // Throwaway secret — never emailed or shown; only to satisfy NOT NULL.
+  const tempPassword = generateSecureToken(24);
+  const hash = await hashPassword(tempPassword);
+
+  const inserted = await pool.query(
+    `INSERT INTO users (name, email, password, role, email_verified)
+     VALUES ($1, $2, $3, 'patient', TRUE)
+     RETURNING id, name, email, role`,
+    [name, normalizedEmail, hash]
+  );
+
+  const user = inserted.rows[0];
+  // Random non-sequential code, pre-checked for uniqueness via pool.
+  const queryViaPool = (sql, params) => pool.query(sql, params);
+  let patientCode = await generateUniquePatientCode(queryViaPool);
+  // Residual race: same-code concurrent insert yields 23505 on
+  // patient_code (user_id is brand-new, so it cannot collide here).
+  // Regenerate once and retry.
+  try {
+    await pool.query(
+      `INSERT INTO patients (user_id, patient_code)
+       VALUES ($1, $2)`,
+      [user.id, patientCode]
+    );
+  } catch (patientInsertErr) {
+    if (patientInsertErr && patientInsertErr.code === '23505') {
+      patientCode = await generateUniquePatientCode(queryViaPool);
+      await pool.query(
+        `INSERT INTO patients (user_id, patient_code)
+         VALUES ($1, $2)`,
+        [user.id, patientCode]
+      );
+    } else {
+      throw patientInsertErr;
+    }
+  }
+
+  const token = signToken(user);
+  return { token, user: { id: user.id, name: user.name, email: user.email, role: user.role } };
+}
+
+// --------- GOOGLE LOGIN (legacy direct idToken POST; kept for compat) ----------
 exports.googleLogin = async (req, res) => {
   const { idToken } = req.body;
   if (!idToken) return res.status(400).json({ error: 'Missing id token.' });
 
   try {
     const googlePayload = await verifyGoogleIdToken(idToken);
-    const normalizedEmail = String(googlePayload.email || '').trim().toLowerCase();
-    if (!normalizedEmail) return res.status(400).json({ error: 'Email not found in Google token.' });
-
-    const existing = await pool.query('SELECT * FROM users WHERE email=$1', [normalizedEmail]);
-
-    if (existing.rows.length) {
-      const user = existing.rows[0];
-      if (!user.active) return res.status(401).json({ error: 'Account deactivated.' });
-      if (user.role !== 'patient') return res.status(403).json({ error: 'Account role not allowed.' });
-
-      if (!user.email_verified) {
-        await pool.query(
-          `UPDATE users
-           SET email_verified=TRUE, verification_code=NULL, verification_code_expires_at=NULL
-           WHERE id=$1`,
-          [user.id]
-        );
-      }
-
-      const patientExists = (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [user.id])).rowCount > 0;
-      if (!patientExists) {
-        const queryViaPool = (sql, params) => pool.query(sql, params);
-        const patientCode = await generateUniquePatientCode(queryViaPool);
-        try {
-          await pool.query(
-            `INSERT INTO patients (user_id, patient_code)
-             VALUES ($1, $2)`,
-            [user.id, patientCode]
-          );
-        } catch (patientInsertErr) {
-          if (!patientInsertErr || patientInsertErr.code !== '23505') throw patientInsertErr;
-          // Residual race — re-check before retrying:
-          // - user_id conflict (concurrent login created the row first):
-          //   the record now exists, so continue login without retrying.
-          // - patient_code conflict: regenerate once and retry the insert.
-          const nowExists =
-            (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [user.id])).rowCount > 0;
-          if (nowExists) {
-            // Concurrent creation won — nothing more to do.
-          } else if (isPatientCodeConflict(patientInsertErr)) {
-            const retryCode = await generateUniquePatientCode(queryViaPool);
-            await pool.query(
-              `INSERT INTO patients (user_id, patient_code)
-               VALUES ($1, $2)`,
-              [user.id, retryCode]
-            );
-          } else {
-            throw patientInsertErr;
-          }
-        }
-      }
-
-      const token = signToken(user);
-      return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
-    }
-
-    const name = String(googlePayload.name || googlePayload.given_name || 'Patient').trim();
-    // Throwaway secret — never emailed or shown; only to satisfy NOT NULL.
-    const tempPassword = generateSecureToken(24);
-    const hash = await hashPassword(tempPassword);
-
-    const inserted = await pool.query(
-      `INSERT INTO users (name, email, password, role, email_verified)
-       VALUES ($1, $2, $3, 'patient', TRUE)
-       RETURNING id, name, email, role`,
-      [name, normalizedEmail, hash]
-    );
-
-    const user = inserted.rows[0];
-    // Random non-sequential code, pre-checked for uniqueness via pool.
-    const queryViaPool = (sql, params) => pool.query(sql, params);
-    let patientCode = await generateUniquePatientCode(queryViaPool);
-    // Residual race: same-code concurrent insert yields 23505 on
-    // patient_code (user_id is brand-new, so it cannot collide here).
-    // Regenerate once and retry.
-    try {
-      await pool.query(
-        `INSERT INTO patients (user_id, patient_code)
-         VALUES ($1, $2)`,
-        [user.id, patientCode]
-      );
-    } catch (patientInsertErr) {
-      if (patientInsertErr && patientInsertErr.code === '23505') {
-        patientCode = await generateUniquePatientCode(queryViaPool);
-        await pool.query(
-          `INSERT INTO patients (user_id, patient_code)
-           VALUES ($1, $2)`,
-          [user.id, patientCode]
-        );
-      } else {
-        throw patientInsertErr;
-      }
-    }
-
-    const token = signToken(user);
-    return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    const session = await findOrCreatePatientFromGooglePayload(googlePayload);
+    return res.json(session);
   } catch (e) {
     console.error(e);
-    return res.status(401).json({ error: e instanceof Error ? e.message : 'Google login failed.' });
+    const status = e && e.status ? e.status : 401;
+    return res.status(status).json({ error: e instanceof Error ? e.message : 'Google login failed.' });
+  }
+};
+
+// --------- GOOGLE OAUTH VIA BACKEND (no Expo proxy) ----------
+// Google only ever sees the backend redirect URI, so the mobile app never
+// needs frontend client IDs or an expo-auth-session redirect like
+// exp://192.168.x.x:8081 (which Google blocks with 400 invalid_request).
+function getGoogleOAuthConfig() {
+  return {
+    clientId: (process.env.GOOGLE_CLIENT_ID || '').trim(),
+    clientSecret: (process.env.GOOGLE_CLIENT_SECRET || '').trim(),
+    redirectUri: (process.env.GOOGLE_REDIRECT_URI || '').trim(),
+    defaultReturnTo: (process.env.MOBILE_GOOGLE_REDIRECT || 'patient-mobile://auth').trim(),
+  };
+}
+
+// Only allow returning the JWT to our own app schemes — prevents open-redirect.
+function isAllowedMobileRedirect(url) {
+  if (!url || typeof url !== 'string') return false;
+  const u = url.trim();
+  return (
+    u.startsWith('patient-mobile://') ||
+    u.startsWith('exp://') ||
+    u.startsWith('http://localhost') ||
+    u.startsWith('http://127.0.0.1') ||
+    u.startsWith('http://192.168.') ||
+    u.startsWith('http://10.')
+  );
+}
+
+// Stateless OAuth state (Vercel-safe): no in-memory Map, since serverless
+// invocations may hit different lambdas. state = base64url(payload).sig where
+// payload = { r: returnTo, n: nonce, iat } and sig = HMAC-SHA256(JWT_SECRET).
+// 10-min TTL, single-use is best-effort (no server store on serverless).
+function b64urlEncode(obj) {
+  return Buffer.from(JSON.stringify(obj)).toString('base64url');
+}
+function b64urlDecode(str) {
+  return JSON.parse(Buffer.from(String(str), 'base64url').toString('utf8'));
+}
+function createOAuthState(returnTo) {
+  if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured');
+  const payload = b64urlEncode({
+    r: returnTo,
+    n: crypto.randomBytes(16).toString('hex'),
+    iat: Date.now(),
+  });
+  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+function consumeOAuthState(state) {
+  try {
+    if (!state || typeof state !== 'string' || !process.env.JWT_SECRET) return null;
+    const [payload, sig] = state.split('.');
+    if (!payload || !sig) return null;
+    const expected = crypto.createHmac('sha256', process.env.JWT_SECRET).update(payload).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const data = b64urlDecode(payload);
+    if (!data || typeof data.r !== 'string') return null;
+    if (Date.now() - Number(data.iat || 0) > 10 * 60 * 1000) return null;
+    if (!isAllowedMobileRedirect(data.r)) return null;
+    return data.r;
+  } catch {
+    return null;
+  }
+}
+
+async function exchangeCodeForTokens({ code, clientId, clientSecret, redirectUri }) {
+  const body = new URLSearchParams({
+    code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code',
+  });
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error((data && (data.error_description || data.error)) || 'Google code exchange failed');
+  }
+  if (!data || !data.id_token) throw new Error('Google did not return an ID token');
+  return data;
+}
+
+function redirectWithError(res, returnTo, message) {
+  const sep = returnTo.includes('?') ? '&' : '?';
+  return res.redirect(`${returnTo}${sep}error=${encodeURIComponent(message)}`);
+}
+
+// GET /auth/google/start?redirect=<mobile-deep-link>
+// e.g. redirect=patient-mobile://auth  (prod) or exp://192.168.x.x:8081/--/auth (Expo Go dev)
+exports.startGoogleOAuth = async (req, res) => {
+  const { clientId, clientSecret, redirectUri, defaultReturnTo } = getGoogleOAuthConfig();
+  const requested = typeof req.query.redirect === 'string' ? req.query.redirect : '';
+  const returnTo = isAllowedMobileRedirect(requested) ? requested : defaultReturnTo;
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    return res.status(500).json({
+      error: 'Google OAuth is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI on the backend.',
+    });
+  }
+
+  let state;
+  try {
+    state = createOAuthState(returnTo);
+  } catch (e) {
+    return res.status(500).json({ error: e instanceof Error ? e.message : 'OAuth state failed.' });
+  }
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: 'openid email profile',
+    prompt: 'select_account',
+    access_type: 'online',
+    state,
+  });
+  return res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+};
+
+// GET /auth/google/callback?code=...&state=...
+exports.googleOAuthCallback = async (req, res) => {
+  const { clientId, clientSecret, redirectUri, defaultReturnTo } = getGoogleOAuthConfig();
+  const { code, state, error } = req.query;
+
+  // State is single-use; fall back to the default scheme when unknown.
+  const returnTo = (typeof state === 'string' && consumeOAuthState(state)) || defaultReturnTo;
+
+  if (error) return redirectWithError(res, returnTo, String(error));
+  if (!code || typeof code !== 'string') return redirectWithError(res, returnTo, 'Google login was cancelled.');
+  if (!clientId || !clientSecret || !redirectUri) {
+    return res.status(500).json({ error: 'Google OAuth is not configured on the backend.' });
+  }
+
+  try {
+    const tokens = await exchangeCodeForTokens({ code, clientId, clientSecret, redirectUri });
+    const googlePayload = await verifyGoogleIdToken(tokens.id_token);
+    const session = await findOrCreatePatientFromGooglePayload(googlePayload);
+
+    const params = new URLSearchParams({
+      token: session.token,
+      id: String(session.user.id),
+      name: session.user.name,
+      email: session.user.email,
+      role: session.user.role,
+    });
+    const sep = returnTo.includes('?') ? '&' : '?';
+    return res.redirect(`${returnTo}${sep}${params.toString()}`);
+  } catch (e) {
+    console.error('googleOAuthCallback:', e && e.message);
+    return redirectWithError(res, returnTo, (e instanceof Error ? e.message : 'Google login failed.'));
   }
 };
