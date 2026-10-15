@@ -1,5 +1,26 @@
 const pool = require('../db');
 
+// Register/update this patient's Expo push token for visit notifications.
+exports.savePushToken = async (req, res) => {
+  const token = req.body && req.body.token !== undefined && req.body.token !== null
+    ? String(req.body.token).trim()
+    : '';
+  if (!token || !/^ExponentPushToken\[[^\]]+\]$/.test(token)) {
+    return res.status(400).json({ error: 'Invalid push token' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO patient_push_tokens (user_id, token, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, updated_at = NOW()`,
+      [req.user.id, token]
+    );
+    return res.json({ message: 'Push token saved.' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to save push token' });
+  }
+};
+
 // Get profile of the logged-in patient
 exports.getMe = async (req, res) => {
   // req.user is set by roleAuth middleware

@@ -18,7 +18,7 @@ export default function AdminPanel() {
     users, patients, appointments, inventory, invoices,
     loading, error, setError, load,
     createInventoryItem, updateInventoryItem,
-    toggleUserActive, createStaff, updateAppointment, createInvoice,
+    toggleUserActive, createStaff, updateAppointment, createInvoice, updateInvoiceStatus,
   } = useAdminData();
 
   const [view, setView] = useState<View>('queue');
@@ -46,6 +46,7 @@ export default function AdminPanel() {
   const [billApptId, setBillApptId] = useState('');
   const [billLines, setBillLines] = useState([{ medicine_name: '', quantity: '1', mrp: '' }]);
   const [linePick, setLinePick] = useState<number | null>(null);
+  const [docFee, setDocFee] = useState('');
   // walk-in booking + EHR viewer + action feedback
   const [bookingPatient, setBookingPatient] = useState<Patient | null>(null);
   const [ehrPatient, setEhrPatient] = useState<Patient | null>(null);
@@ -56,6 +57,37 @@ export default function AdminPanel() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Live queue: re-check for new patient bookings by itself every 15s while
+  // the queue is open (paused when the tab is hidden to save battery/data).
+  const [lastSync, setLastSync] = useState<Date | null>(null);
+  useEffect(() => {
+    if (view !== 'queue') return;
+    setLastSync(new Date());
+    const id = setInterval(() => {
+      if (document.hidden) return;
+      load().then(() => setLastSync(new Date())).catch(() => {});
+    }, 15000);
+    return () => clearInterval(id);
+  }, [view, load]);
+
+  const ACCEPT_DEFAULT =
+    'Your request is accepted. Please be at the clinic 10 minutes before your scheduled time.';
+
+  // Prefill the message box with the default accept text for pending visits.
+  useEffect(() => {
+    setMsgDrafts((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const a of appointments) {
+        if (a.status === 'pending' && !(a.id in next)) {
+          next[a.id] = ACCEPT_DEFAULT;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [appointments]);
 
   const run = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -136,6 +168,12 @@ export default function AdminPanel() {
     return (cents / 100).toFixed(2);
   }, [billLines]);
 
+  const billGrand = useMemo(() => {
+    const feeCents = Math.round((Number(docFee) || 0) * 100);
+    const medCents = Math.round(Number(billTotal) * 100);
+    return ((medCents + feeCents) / 100).toFixed(2);
+  }, [billTotal, docFee]);
+
   return (
     <div className="adminShell">
       <aside className="adminSide" aria-label="Admin navigation">
@@ -175,8 +213,11 @@ export default function AdminPanel() {
             <section className="card" aria-label="Appointment queue">
               <div className="sectionTop">
                 <div>
-                  <h2>Appointment queue</h2>
-                  <p className="muted">New mobile bookings land here. Accept, decline, or message the patient.</p>
+                  <h2>Appointment queue {queueFilter === 'pending' && pendingCount > 0 && <span className="liveDot" title="Live — checking for new bookings">● Live</span>}</h2>
+                  <p className="muted">
+                    New mobile bookings land here. Accept, decline, or message the patient.
+                    {lastSync ? ` Last checked ${lastSync.toLocaleTimeString()}.` : ''}
+                  </p>
                 </div>
               </div>
               <div className="listToolbar">
@@ -208,9 +249,22 @@ export default function AdminPanel() {
                           {a.token_number ? ` · Token ${String(a.token_number)}` : ''}
                         </p>
                         {a.reason ? <p className="queueSub">Reason: {String(a.reason)}</p> : null}
-                        {typeof a.notes === 'string' && a.notes ? <p className="queueSub">Note: {a.notes}</p> : null}
+                        {typeof a.notes === 'string' && a.notes ? (
+                          <div className="queueNote" aria-label="Visit note">
+                            <span className="queueNoteTag">Note</span>
+                            <p>{a.notes}</p>
+                          </div>
+                        ) : null}
                       </div>
-                      <span className={`pill status ${String(a.status || 'pending')}`}>{String(a.status || 'pending')}</span>
+                      <span style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
+                        <span className={`pill status ${String(a.status || 'pending')}`}>{String(a.status || 'pending')}</span>
+                        {(() => {
+                          const s = String(a.scheduled_at_effective ?? a.scheduled_at ?? '');
+                          return s && new Date(s).toDateString() === todayStr ? (
+                            <span className="pill status confirmed">Today</span>
+                          ) : null;
+                        })()}
+                      </span>
                     </div>
                     <div className="queueActions">
                       {a.status === 'pending' && (
@@ -563,7 +617,11 @@ export default function AdminPanel() {
               })}
               <div className="formRow">
                 <button className="ghostBtn" onClick={() => setBillLines((p) => [...p, { medicine_name: '', quantity: '1', mrp: '' }])}>+ Add line</button>
-                <span className="muted">Total ₹{billTotal}</span>
+                <label className="fieldLabel">Doctor charge ₹
+                  <input placeholder="e.g. 300" aria-label="Doctor charge" inputMode="decimal" value={docFee}
+                    onChange={(e) => setDocFee(e.target.value)} style={{ maxWidth: 110 }} />
+                </label>
+                <span className="muted">Medicines ₹{billTotal} + Doctor ₹{(Number(docFee) || 0).toFixed(2)} = <strong>₹{billGrand}</strong></span>
                 <button className="primaryBtn" disabled={busy === 'bill-create' || !billPatientId}
                   onClick={() => run('bill-create', async () => {
                     if (!billPatient) throw new Error('Pick a patient from the search list first.');
@@ -573,9 +631,10 @@ export default function AdminPanel() {
                       patient_id: billPatient.patient_id as number,
                       patient_code: billPatient.patient_code ?? undefined,
                       appointment_id: billApptId ? Number(billApptId) : null,
+                      doctor_fee: docFee.trim() || undefined,
                       items,
                     } as never);
-                    setBillPatientId(null); setBillQuery(''); setBillApptId('');
+                    setBillPatientId(null); setBillQuery(''); setBillApptId(''); setDocFee('');
                     setBillLines([{ medicine_name: '', quantity: '1', mrp: '' }]);
                   })}>
                   {busy === 'bill-create' ? 'Creating…' : 'Create invoice'}
@@ -594,13 +653,22 @@ export default function AdminPanel() {
                       <strong>#{v.id} · ₹{String(v.total_amount)}</strong>
                       <span>{String(v.patient_name ?? '')} {v.patient_code ? `(${String(v.patient_code)})` : ''} · {v.invoice_date ? formatDate(String(v.invoice_date)) : ''}</span>
                     </div>
-                    <button className="ghostBtn" disabled={!!busy}
-                      onClick={() => run(`print-${v.id}`, async () => {
-                        const res = await apiClient.get(`/billing/invoices/${v.id}`);
-                        printInvoice(res.data);
-                      })}>
-                      {busy === `print-${v.id}` ? '…' : 'Print'}
-                    </button>
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span className={`pill status ${String(v.status || 'unpaid') === 'paid' ? 'confirmed' : 'pending'}`}>
+                        {String(v.status || 'unpaid')}
+                      </span>
+                      <button className="ghostBtn" disabled={!!busy}
+                        onClick={() => run(`pay-${v.id}`, () => updateInvoiceStatus(v.id, String(v.status) === 'paid' ? 'unpaid' : 'paid'))}>
+                        {String(v.status) === 'paid' ? 'Mark unpaid' : 'Mark paid'}
+                      </button>
+                      <button className="ghostBtn" disabled={!!busy}
+                        onClick={() => run(`print-${v.id}`, async () => {
+                          const res = await apiClient.get(`/billing/invoices/${v.id}`);
+                          printInvoice(res.data);
+                        })}>
+                        {busy === `print-${v.id}` ? '…' : 'Print'}
+                      </button>
+                    </span>
                   </div>
                 ))
               )}

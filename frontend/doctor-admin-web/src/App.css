@@ -1233,3 +1233,46 @@ button {
 
 .stockTag.ok { background: #dff3ea; color: #147a5c; }
 .stockTag.out { background: #f5c9c9; color: #9a3b3b; }
+
+.liveDot {
+  font-size: 12px;
+  font-weight: 800;
+  color: #147a5c;
+  background: #dff3ea;
+  border-radius: 999px;
+  padding: 3px 10px;
+  vertical-align: middle;
+  animation: livePulse 2s ease-in-out infinite;
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.queueNote {
+  margin-top: 8px;
+  background: #f6f9f8;
+  border: 1px solid #d9e6e2;
+  border-left: 4px solid var(--teal-600);
+  border-radius: 10px;
+  padding: 9px 12px;
+  max-width: 560px;
+}
+
+.queueNoteTag {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--teal-600);
+}
+
+.queueNote p {
+  margin: 4px 0 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

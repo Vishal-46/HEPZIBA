@@ -38,8 +38,9 @@ type Appointment = {
   scheduled_at?: string;
   scheduled_at_effective?: string;
   date_time?: string;
-  status: 'pending' | 'confirmed' | 'done' | 'cancelled';
+  status: 'pending' | 'confirmed' | 'done' | 'completed' | 'cancelled';
   reason?: string;
+  notes?: string;
   doctor_name?: string;
   token_number?: number;
 };
@@ -87,13 +88,13 @@ const CLINIC_DETAILS = {
 
 const CLINIC_HIGHLIGHTS = [
   'Specialist chest and respiratory care',
-  'Friendly appointment system with token number',
+  'Easy appointment requests with quick confirmation',
   'Your records and prescriptions in one place',
 ];
 
 const HOW_TO_USE = [
   'Book Appointment: pick a doctor and time, add your reason and symptoms.',
-  'Consult Doctor: visit the clinic at your token time for consultation.',
+  'Consult Doctor: visit the clinic at your scheduled time for consultation.',
   'View Records: check appointments, prescriptions, and bills anytime.',
   'Update Profile: keep your contact and health details updated.',
 ];
@@ -276,6 +277,56 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
     void loadAll();
   }, [loadAll]);
 
+  // Push registration + live handlers: a tap or foreground banner refreshes
+  // visits immediately so admin decisions appear at once.
+  useEffect(() => {
+    let notifySub: { remove(): void } | null = null;
+    let respondSub: { remove(): void } | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const mod = await import('../utils/pushRegistration');
+        if (cancelled) return;
+        void mod.registerPushToken(token);
+        notifySub = mod.Notifications.addNotificationReceivedListener(() => {
+          setInfoText('Update from clinic — refreshing your visits…');
+          void apiGet(`${API_BASE_URL}/appointments/my`)
+            .then((apps) => {
+              if (Array.isArray(apps)) setAppointments(apps);
+            })
+            .catch(() => {});
+        });
+        respondSub = mod.Notifications.addNotificationResponseReceivedListener(() => {
+          setTab('home');
+          void loadAll();
+        });
+      } catch {
+        // Push unavailable (web/simulator): polling below still applies.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      notifySub?.remove();
+      respondSub?.remove();
+    };
+  }, [token, apiGet, loadAll]);
+
+  // Live status: re-check visit decisions by itself every 30s so an admin
+  // Accept/Decline flips pending → approved without manual refresh.
+  useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const apps = await apiGet(`${API_BASE_URL}/appointments/my`);
+        if (Array.isArray(apps)) setAppointments(apps);
+        const bills = await apiGet(`${API_BASE_URL}/billing/my`);
+        if (Array.isArray(bills)) setInvoices(bills);
+      } catch {
+        // Silent: next tick retries; errors surface on full load.
+      }
+    }, 30000);
+    return () => clearInterval(id);
+  }, [apiGet]);
+
   // Transient messages are per-tab: clear on tab switch. Keeps isOffline/
   // offline banner untouched (persistent until reconnect).
   useEffect(() => {
@@ -450,9 +501,10 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       if (!response.ok) throw new Error(apiErrorMessage(payload, 'Booking failed'));
 
       setInfoText(
-        `Appointment booked with ${selectedDoctor?.name || 'doctor'}. Token #${payload.appointment?.token_number ?? payload?.token_number ?? '-'}`,
+        'Request submitted — the clinic will confirm shortly. Watch Home for your visit status.',
       );
       setShowBookModal(false);
+      setTab('home');
       await loadAll();
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : 'Booking failed');
@@ -633,12 +685,16 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                     <Text style={s.heroMeta}>{nextAppointment.doctor_name || 'Assigned doctor'}</Text>
                     <View style={s.metaRow}>
                       <Chip compact style={s.heroChip} textStyle={s.heroChipText}>
-                        Token #{nextAppointment.token_number || '-'}
-                      </Chip>
-                      <Chip compact style={s.heroChip} textStyle={s.heroChipText}>
-                        {nextAppointment.status}
+                        {nextAppointment.status === 'confirmed'
+                          ? 'Approved ✓'
+                          : nextAppointment.status === 'pending'
+                            ? 'Waiting for approval'
+                            : nextAppointment.status}
                       </Chip>
                     </View>
+                    {!!nextAppointment.notes && (
+                      <Text style={s.heroMeta}>Clinic message: {nextAppointment.notes}</Text>
+                    )}
                     <Button
                       mode="contained"
                       onPress={() => setTab('records')}
@@ -896,8 +952,8 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                     <Card.Content>
                       <Text style={s.rowTitle}>{formatDate(app)}</Text>
                       <Text style={s.rowMeta}>Doctor: {app.doctor_name || '-'}</Text>
-                      <Text style={s.rowMeta}>Token: #{app.token_number || '-'}</Text>
                       <Text style={s.rowMeta}>Status: {app.status}</Text>
+                      {!!app.notes && <Text style={s.rowMeta}>Clinic message: {app.notes}</Text>}
                     </Card.Content>
                   </Card>
                 ))

@@ -5,6 +5,7 @@ const roleAuth = require('../middleware/roleAuth');
 
 router.get('/invoices', roleAuth(['admin', 'doctor']), ctrl.listInvoices);
 router.post('/invoices', roleAuth('admin'), ctrl.createInvoice);
+router.patch('/invoices/:id', roleAuth('admin'), ctrl.updateInvoiceStatus);
 router.get('/my', roleAuth('patient'), ctrl.getMyInvoices);
 router.get('/invoices/:id', roleAuth(['admin', 'patient']), ctrl.getInvoiceById);
 

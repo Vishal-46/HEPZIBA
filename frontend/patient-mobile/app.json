@@ -36,6 +36,7 @@
       "expo-font",
       "expo-status-bar",
       "expo-web-browser",
+      "expo-notifications",
       [
         "expo-splash-screen",
         {

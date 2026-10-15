@@ -8,7 +8,7 @@ const validate = require('../middleware/validate');
 
 // All endpoints here require a valid JWT
 router.get('/me', roleAuth('patient'), ctrl.getMe);
-router.put('/me', roleAuth('patient'), [
+router.post('/push-token', roleAuth('patient'), ctrl.savePushToken);router.put('/me', roleAuth('patient'), [
     body('address').optional().trim(),
     body('contact').optional().trim()
 ], validate, ctrl.updateMe);

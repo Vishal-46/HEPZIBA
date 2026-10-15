@@ -19,7 +19,7 @@ function moneyToCents(value) {
 }
 
 exports.createInvoice = async (req, res) => {
-  const { patient_id, patient_code, appointment_id, doctor_name, items } = req.body;
+  const { patient_id, patient_code, appointment_id, doctor_name, doctor_fee, items } = req.body;
 
   if ((!patient_id && !patient_code) || !Array.isArray(items) || !items.length) {
     return res.status(400).json({ error: 'patient (select from the picker) and invoice items are required' });
@@ -81,6 +81,16 @@ exports.createInvoice = async (req, res) => {
     });
   }
   const totalAmount = (totalCents / 100).toFixed(2);
+  // Doctor consultation charge, billed separately from medicines.
+  let doctorFeeCents = 0;
+  if (doctor_fee !== undefined && doctor_fee !== null && String(doctor_fee).trim() !== '') {
+    doctorFeeCents = moneyToCents(doctor_fee);
+    if (!Number.isInteger(doctorFeeCents) || doctorFeeCents < 0) {
+      return res.status(400).json({ error: 'doctor_fee must be a non-negative amount with at most 2 decimals' });
+    }
+  }
+  const grandCents = totalCents + doctorFeeCents;
+  const grandAmount = (grandCents / 100).toFixed(2);
   const cleanDoctorName = doctor_name !== undefined && doctor_name !== null
     ? String(doctor_name).trim() || null
     : null;
@@ -117,10 +127,10 @@ exports.createInvoice = async (req, res) => {
     }
 
     const invoiceQ = await client.query(
-      `INSERT INTO invoices (patient_id, appointment_id, doctor_name, total_amount)
-       VALUES ($1,$2,$3,$4)
+      `INSERT INTO invoices (patient_id, appointment_id, doctor_name, doctor_fee, total_amount)
+       VALUES ($1,$2,$3,$4,$5)
        RETURNING *`,
-      [patientIdNum, appointmentIdNum, cleanDoctorName, totalAmount]
+      [patientIdNum, appointmentIdNum, cleanDoctorName, (doctorFeeCents / 100).toFixed(2), grandAmount]
     );
     const invoice = invoiceQ.rows[0];
 
@@ -164,7 +174,13 @@ exports.createInvoice = async (req, res) => {
     }
 
     await client.query('COMMIT');
-    return res.json({ message: 'Invoice created', invoice_id: invoice.id, total_amount: Number(totalAmount) });
+    return res.json({
+      message: 'Invoice created',
+      invoice_id: invoice.id,
+      medicines_amount: Number(totalAmount),
+      doctor_fee: Number((doctorFeeCents / 100).toFixed(2)),
+      total_amount: Number(grandAmount),
+    });
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
     console.error(error);
@@ -234,6 +250,27 @@ exports.getInvoiceById = async (req, res) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to fetch invoice' });
+  }
+};
+
+// PATCH /billing/invoices/:id — mark paid/unpaid (admin). Paid invoices are
+// treatment history: they stay readable but represent closed billing.
+exports.updateInvoiceStatus = async (req, res) => {
+  const invoiceId = Number(req.params.id);
+  const status = req.body && req.body.status !== undefined && req.body.status !== null
+    ? String(req.body.status).trim().toLowerCase()
+    : '';
+  if (!Number.isInteger(invoiceId)) return res.status(400).json({ error: 'Invalid invoice id' });
+  if (!['paid', 'unpaid'].includes(status)) {
+    return res.status(400).json({ error: "status must be 'paid' or 'unpaid'" });
+  }
+  try {
+    const q = await pool.query('UPDATE invoices SET status=$1 WHERE id=$2 RETURNING *', [status, invoiceId]);
+    if (!q.rows.length) return res.status(404).json({ error: 'Invoice not found' });
+    return res.json({ message: `Invoice marked ${status}.`, invoice: q.rows[0] });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to update invoice' });
   }
 };
 exports.listInvoices = async (req, res) => {

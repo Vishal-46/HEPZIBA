@@ -104,6 +104,7 @@ export function useAdminData() {
       patient_code?: string;
       appointment_id?: number | null;
       doctor_name?: string;
+      doctor_fee?: string;
       items: Array<{ medicine_name: string; quantity: number; mrp: string; unit?: string }>;
     }) => {
       try {
@@ -112,6 +113,18 @@ export function useAdminData() {
         return res.data;
       } catch (err) {
         throw new Error(apiErrorMessage(err, 'Failed to create invoice'), { cause: err });
+      }
+    },
+    [load],
+  );
+
+  const updateInvoiceStatus = useCallback(
+    async (id: number, status: 'paid' | 'unpaid') => {
+      try {
+        await apiClient.patch(`/billing/invoices/${id}`, { status });
+        await load();
+      } catch (err) {
+        throw new Error(apiErrorMessage(err, 'Failed to update invoice'), { cause: err });
       }
     },
     [load],
@@ -133,5 +146,6 @@ export function useAdminData() {
     createStaff,
     updateAppointment,
     createInvoice,
+    updateInvoiceStatus,
   };
 }

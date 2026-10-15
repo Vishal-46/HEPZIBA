@@ -13,6 +13,8 @@ psql -U your_username -d your_database_name -f backend/sql/005_session_tokens.sq
 psql -U your_username -d your_database_name -f backend/sql/006_clinic_settings.sql
 # Inventory MRP + expiry columns — idempotent:
 psql -U your_username -d your_database_name -f backend/sql/007_inventory_mrp_expiry.sql
+# Invoice doctor fee + paid check + push tokens — idempotent:
+psql -U your_username -d your_database_name -f backend/sql/008_billing_fee_push.sql
 ```
 `002_fix_doctors_and_constraints.sql` is forward-only and idempotent (safe to re-run).
 `002_seed_admin_example.sql` is a commented-out template only (no-op); consider renumbering it to `003_` to avoid the duplicate `002_` prefix.

@@ -126,6 +126,19 @@ exports.updateAppointmentStatus = async (req, res) => {
       [nextStatus ? toDb(nextStatus) : null, cleanNotes, appointmentId]
     );
     if (!q.rows.length) return res.status(404).json({ error: 'Appointment not found' });
+    const finalStatus = q.rows[0].status === 'completed' ? 'done' : q.rows[0].status;
+    // Best-effort patient notification (never fails the update).
+    try {
+      const { notifyAppointmentOwner } = require('../utils/push');
+      const msg = cleanNotes || '';
+      if (finalStatus === 'confirmed') {
+        void notifyAppointmentOwner(appointmentId, 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
+      } else if (finalStatus === 'cancelled') {
+        void notifyAppointmentOwner(appointmentId, 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
+      } else if (finalStatus === 'done') {
+        void notifyAppointmentOwner(appointmentId, 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
+      }
+    } catch (_) { /* ignore */ }
     res.json({ message: 'Appointment updated', appointment: q.rows[0] });
   } catch (e) {
     console.error(e); res.status(500).json({ error: 'Failed to update appointment' });

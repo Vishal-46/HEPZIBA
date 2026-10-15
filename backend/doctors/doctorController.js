@@ -82,6 +82,18 @@ exports.updateAppointment = async (req, res) => {
     const cleanNotes = notes !== undefined && notes !== null ? String(notes).trim() || null : null;
     // Preserve existing values when a field is omitted (COALESCE keeps old).
     await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [nextStatus ? toDb(nextStatus) : null, cleanNotes, req.params.id]);
+    try {
+      const { notifyAppointmentOwner } = require('../utils/push');
+      const msg = cleanNotes || '';
+      const done = nextStatus === 'done' || nextStatus === 'completed';
+      if (nextStatus === 'confirmed') {
+        void notifyAppointmentOwner(Number(req.params.id), 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
+      } else if (nextStatus === 'cancelled') {
+        void notifyAppointmentOwner(Number(req.params.id), 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
+      } else if (done) {
+        void notifyAppointmentOwner(Number(req.params.id), 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
+      }
+    } catch (_) { /* ignore */ }
     res.json({ message: 'Appointment updated' });
   } catch (e) {
     console.error(e); res.status(500).json({ error: 'Failed to update appointment' });
