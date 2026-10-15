@@ -31,6 +31,7 @@ export default function PatientManagement({
   const [formData, setFormData] = useState({
     name: '',
     email: '',
+    password: '',
     age: '',
     sex: 'Male',
     mobile: '',
@@ -68,6 +69,14 @@ export default function PatientManagement({
       setError('Patient name is required');
       return;
     }
+    if (!formData.email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
+      setError('Patient email is required — they sign into the app with it');
+      return;
+    }
+    if (formData.password && formData.password.length < 8) {
+      setError('App password must be at least 8 characters (or leave it blank for Google sign-in)');
+      return;
+    }
     if (formData.mobile && !/^\d{10,15}$/.test(formData.mobile.trim())) {
       setError('Mobile number must be 10-15 digits');
       return;
@@ -93,11 +102,14 @@ export default function PatientManagement({
         spo2: formData.spo2 ? Number(formData.spo2) : undefined,
       });
 
-      setSuccess(`Patient ${formData.name} registered successfully with Code: ${res.data?.patient?.patient_code || 'Issued'}`);
+      setSuccess(
+        `${res.data?.message || 'Patient registered.'} Code: ${res.data?.patient?.patient_code || 'Issued'} — app login: ${res.data?.login?.email || formData.email.trim().toLowerCase()}`
+      );
       setShowModal(false);
       setFormData({
         name: '',
         email: '',
+        password: '',
         age: '',
         sex: 'Male',
         mobile: '',
@@ -328,6 +340,33 @@ export default function PatientManagement({
                   value={formData.address}
                   onChange={(e) => setFormData({ ...formData, address: e.target.value })}
                 />
+              </div>
+
+              <div style={{ background: '#eef7f2', padding: '12px', borderRadius: '8px', border: '1px solid #bfe3cf', marginBottom: '12px' }}>
+                <h4 style={{ margin: '0 0 4px 0', fontSize: '14px', color: '#147a5c' }}>App login (ask the patient to download the app)</h4>
+                <p className="muted" style={{ margin: '0 0 10px 0' }}>They sign in with this email — Google sign-in with the same email, or the password below.</p>
+                <div className="grid2" style={{ gap: '12px' }}>
+                  <div>
+                    <label style={{ fontSize: '13px', fontWeight: 600 }}>Email for app login *</label>
+                    <input
+                      required
+                      type="email"
+                      placeholder="patient@email.com"
+                      value={formData.email}
+                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '13px', fontWeight: 600 }}>App password (optional, min 8)</label>
+                    <input
+                      type="password"
+                      placeholder="Leave blank for Google sign-in"
+                      value={formData.password}
+                      onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                </div>
               </div>
 
               <div style={{ background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '16px' }}>

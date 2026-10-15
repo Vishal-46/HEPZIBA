@@ -287,6 +287,7 @@ exports.registerWalkin = async (req, res) => {
   const {
     name,
     email,
+    password,
     age,
     sex,
     dob,
@@ -332,7 +333,21 @@ exports.registerWalkin = async (req, res) => {
     }
 
     const randomPwd = crypto.randomBytes(16).toString('hex');
-    const pwdHash = await hashPassword(randomPwd);
+    // Optional app password set by reception: patient signs into the mobile
+    // app with this + the email above. Without it, the patient uses Google
+    // sign-in (same email) or Forgot password to set one.
+    let appPasswordSet = false;
+    let pwdHash;
+    if (password !== undefined && password !== null && String(password).trim() !== '') {
+      if (String(password).length < 8) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'App password must be at least 8 characters.' });
+      }
+      pwdHash = await hashPassword(String(password));
+      appPasswordSet = true;
+    } else {
+      pwdHash = await hashPassword(randomPwd);
+    }
 
     const userQ = await client.query(
       `INSERT INTO users (name, email, password, role, active, email_verified)
@@ -367,13 +382,19 @@ exports.registerWalkin = async (req, res) => {
     );
 
     await client.query('COMMIT');
+    const realEmail = !cleanEmail.includes('@hepzibaclinic.local');
     return res.status(201).json({
-      message: 'Patient registered successfully',
+      message: realEmail
+        ? (appPasswordSet
+          ? 'Patient registered. They sign into the app with this email + the password you set (Google sign-in with the same email also works).'
+          : 'Patient registered. They sign into the app with Google using this email, or Forgot password to set one.')
+        : 'Patient registered with a placeholder email — add their real email later so they can sign into the app.',
       patient: {
         ...userQ.rows[0],
         ...patientQ.rows[0],
         patient_id: patientQ.rows[0].id,
       },
+      login: { email: userQ.rows[0].email, hasPassword: appPasswordSet, googleReady: realEmail },
     });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch (_) {}
@@ -391,6 +412,7 @@ exports.updatePatientById = async (req, res) => {
 
   const {
     name,
+    email,
     age,
     sex,
     dob,
@@ -403,6 +425,10 @@ exports.updatePatientById = async (req, res) => {
     bp,
     spo2,
   } = req.body;
+
+  if (email !== undefined && email !== null && String(email).trim() !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+    return res.status(400).json({ error: 'Invalid email address' });
+  }
 
   if (mobile && !/^\d{10,15}$/.test(String(mobile).trim())) {
     return res.status(400).json({ error: 'Mobile must be 10-15 digits' });
@@ -426,6 +452,18 @@ exports.updatePatientById = async (req, res) => {
 
     if (name) {
       await client.query('UPDATE users SET name=$1, updated_at=NOW() WHERE id=$2', [String(name).trim(), userId]);
+    }
+
+    // Attach a real email later so a placeholder walk-in account can sign
+    // into the app (Google with the same email, or password login).
+    if (email !== undefined && email !== null && String(email).trim() !== '') {
+      const cleanEmail = String(email).trim().toLowerCase();
+      const dup = await client.query('SELECT id FROM users WHERE LOWER(email)=LOWER($1) AND id<>$2', [cleanEmail, userId]);
+      if (dup.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Email already in use' });
+      }
+      await client.query('UPDATE users SET email=$1, updated_at=NOW() WHERE id=$2', [cleanEmail, userId]);
     }
 
     await client.query(

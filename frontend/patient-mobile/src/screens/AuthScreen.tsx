@@ -451,6 +451,11 @@ export default function AuthScreen({ onLoginSuccess }: Props) {
 
             {(mode === 'login' || mode === 'register') && (
               <>
+                {mode === 'login' && (
+                  <Text style={[s.infoText, { marginBottom: 4 }]}>
+                    Registered at the clinic? Sign in with the email you gave at reception — Google sign-in or your password both work.
+                  </Text>
+                )}
                 <View style={s.dividerRow}>
                   <View style={s.dividerLine} />
                   <Text style={s.dividerText}>or</Text>
