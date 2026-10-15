@@ -288,7 +288,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         const mod = await import('../utils/pushRegistration');
         if (cancelled) return;
         void mod.registerPushToken(token);
-        notifySub = mod.Notifications.addNotificationReceivedListener(() => {
+        notifySub = await mod.addNotificationReceivedListener(() => {
           setInfoText('Update from clinic — refreshing your visits…');
           void apiGet(`${API_BASE_URL}/appointments/my`)
             .then((apps) => {
@@ -296,7 +296,8 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
             })
             .catch(() => {});
         });
-        respondSub = mod.Notifications.addNotificationResponseReceivedListener(() => {
+        if (cancelled) return;
+        respondSub = await mod.addNotificationResponseReceivedListener(() => {
           setTab('home');
           void loadAll();
         });
