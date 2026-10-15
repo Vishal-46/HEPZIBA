@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAdminData } from '../hooks/useAdminData';
 import type { Patient } from '../types';
 import { formatDate } from '../utils/format';
@@ -19,6 +19,7 @@ export default function AdminPanel() {
     loading, error, setError, load,
     createInventoryItem, updateInventoryItem,
     toggleUserActive, createStaff, updateAppointment, createInvoice, updateInvoiceStatus,
+    refreshAppointmentsQuiet,
   } = useAdminData();
 
   const [view, setView] = useState<View>('queue');
@@ -58,18 +59,38 @@ export default function AdminPanel() {
     load();
   }, [load]);
 
-  // Live queue: re-check for new patient bookings by itself every 15s while
-  // the queue is open (paused when the tab is hidden to save battery/data).
+  // Live queue: silently check for new bookings every 10s while the queue
+  // is open. No spinners, no reload flash — only actual changes surface,
+  // announced by a "new requests" pill. Paused when the tab is hidden.
   const [lastSync, setLastSync] = useState<Date | null>(null);
+  const [newIds, setNewIds] = useState<number[]>([]);
+  const knownIds = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (view !== 'queue') return;
     setLastSync(new Date());
-    const id = setInterval(() => {
-      if (document.hidden) return;
-      load().then(() => setLastSync(new Date())).catch(() => {});
-    }, 15000);
-    return () => clearInterval(id);
-  }, [view, load]);
+    let stopped = false;
+    const quietCheck = async () => {
+      if (document.hidden || stopped) return;
+      try {
+        const hadBaseline = knownIds.current.size > 0;
+        const fresh = await refreshAppointmentsQuiet();
+        if (stopped) return;
+        const unseen = fresh.filter((a) => !knownIds.current.has(a.id)).map((a) => a.id);
+        for (const a of fresh) knownIds.current.add(a.id);
+        if (hadBaseline && unseen.length > 0) {
+          setNewIds((prev) => [...prev, ...unseen.filter((id) => !prev.includes(id))]);
+        }
+        setLastSync(new Date());
+      } catch {
+        // Silent: next tick retries.
+      }
+    };
+    const id = setInterval(quietCheck, 10000);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, [view, refreshAppointmentsQuiet]);
 
   const ACCEPT_DEFAULT =
     'Your request is accepted. Please be at the clinic 10 minutes before your scheduled time.';
@@ -213,12 +234,25 @@ export default function AdminPanel() {
             <section className="card" aria-label="Appointment queue">
               <div className="sectionTop">
                 <div>
-                  <h2>Appointment queue {queueFilter === 'pending' && pendingCount > 0 && <span className="liveDot" title="Live — checking for new bookings">● Live</span>}</h2>
+                  <h2>Appointment queue {queueFilter === 'pending' && pendingCount > 0 && <span className="liveDot" title="Watching for new bookings">● Live</span>}</h2>
                   <p className="muted">
-                    New mobile bookings land here. Accept, decline, or message the patient.
+                    New mobile bookings appear here on their own.
                     {lastSync ? ` Last checked ${lastSync.toLocaleTimeString()}.` : ''}
                   </p>
                 </div>
+                {newIds.length > 0 && (
+                  <button
+                    className="newPill"
+                    onClick={() => {
+                      setNewIds([]);
+                      setQueueFilter('pending');
+                      setQueueQuery('');
+                    }}
+                    title="Show new requests"
+                  >
+                    {newIds.length} new request{newIds.length === 1 ? '' : 's'} ↓
+                  </button>
+                )}
               </div>
               <div className="listToolbar">
                 <div className="segRow" role="tablist" aria-label="Queue filter">
@@ -238,10 +272,13 @@ export default function AdminPanel() {
                 <EmptyState message={appointments.length === 0 ? 'No appointments yet — patient bookings from the mobile app will appear here.' : 'Queue is clear.'} />
               ) : (
                 queue.slice(0, 30).map((a) => (
-                  <article key={a.id} className={`queueCard ${a.status === 'pending' ? 'urgent' : ''}`}>
+                  <article key={a.id} className={`queueCard ${a.status === 'pending' ? 'urgent' : ''} ${newIds.includes(a.id) ? 'fresh' : ''}`}>
                     <div className="queueTop">
                       <div>
-                        <p className="queueName">{String(a.patient_name ?? 'Patient')} <span className="muted">#{a.id}</span></p>
+                        <p className="queueName">
+                          {String(a.patient_name ?? 'Patient')} <span className="muted">#{a.id}</span>{' '}
+                          {newIds.includes(a.id) && <span className="freshTag">New</span>}
+                        </p>
                         <p className="queueSub">
                           {a.patient_code ? `${String(a.patient_code)} · ` : ''}
                           {a.mobile ? `${String(a.mobile)} · ` : ''}
@@ -270,18 +307,27 @@ export default function AdminPanel() {
                       {a.status === 'pending' && (
                         <>
                           <button className="acceptBtn" disabled={!!busy}
-                            onClick={() => run(`accept-${a.id}`, () => updateAppointment(a.id, { status: 'confirmed', notes: msgDrafts[a.id] || undefined }))}>
+                            onClick={() => {
+                              setNewIds((prev) => prev.filter((id) => id !== a.id));
+                              run(`accept-${a.id}`, () => updateAppointment(a.id, { status: 'confirmed', notes: msgDrafts[a.id] || undefined }));
+                            }}>
                             Accept
                           </button>
                           <button className="declineBtn" disabled={!!busy}
-                            onClick={() => run(`decline-${a.id}`, () => updateAppointment(a.id, { status: 'cancelled', notes: msgDrafts[a.id] || undefined }))}>
+                            onClick={() => {
+                              setNewIds((prev) => prev.filter((id) => id !== a.id));
+                              run(`decline-${a.id}`, () => updateAppointment(a.id, { status: 'cancelled', notes: msgDrafts[a.id] || undefined }));
+                            }}>
                             Decline
                           </button>
                         </>
                       )}
                       {a.status === 'confirmed' && (
                         <button className="doneBtn" disabled={!!busy}
-                          onClick={() => run(`done-${a.id}`, () => updateAppointment(a.id, { status: 'done' }))}>
+                          onClick={() => {
+                            setNewIds((prev) => prev.filter((id) => id !== a.id));
+                            run(`done-${a.id}`, () => updateAppointment(a.id, { status: 'done' }));
+                          }}>
                           Mark done
                         </button>
                       )}

@@ -130,6 +130,16 @@ export function useAdminData() {
     [load],
   );
 
+  // Silent appointment check: refreshes the list WITHOUT the loading
+  // spinner, so background polling never flashes the dashboard.
+  // Returns the fresh list for change detection.
+  const refreshAppointmentsQuiet = useCallback(async () => {
+    const res = await apiClient.get<Appointment[]>('/admin/appointments?limit=100');
+    const fresh = Array.isArray(res.data) ? res.data : [];
+    setAppointments(fresh);
+    return fresh;
+  }, []);
+
   return {
     users,
     patients,
@@ -147,5 +157,6 @@ export function useAdminData() {
     updateAppointment,
     createInvoice,
     updateInvoiceStatus,
+    refreshAppointmentsQuiet,
   };
 }
