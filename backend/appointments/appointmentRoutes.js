@@ -17,10 +17,10 @@ router.post('/', roleAuth(['patient', 'admin', 'doctor']), [
 ], validate, ctrl.createAppointment);
 router.get('/my', roleAuth('patient'), ctrl.getMyAppointments);
 router.get('/catalog/doctors', roleAuth('patient'), ctrl.listDoctorsForPatients);
+// Doctor endpoint (must be before /:id or "for-me" matches as an id)
+router.get('/for-me', roleAuth('doctor'), ctrl.getForMe);
 // Patient ownership: view / cancel own appointment
 router.get('/:id', roleAuth('patient'), ctrl.getMyAppointmentById);
 router.patch('/:id', roleAuth('patient'), ctrl.cancelMyAppointment);
-// Doctor endpoint
-router.get('/for-me', roleAuth('doctor'), ctrl.getForMe);
 
 module.exports = router;

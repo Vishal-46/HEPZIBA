@@ -1,7 +1,8 @@
 :root {
-  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-  color: #1C242B;
-  background: #F2F4F7;
+  font-family: "Inter", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #1c242b;
+  background: #eef1f5;
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
@@ -10,5 +11,11 @@
 
 body {
   margin: 0;
-  background: #F2F4F7;
+  background: #eef1f5;
+  font-feature-settings: "cv11", "ss01";
+}
+
+h1, h2, h3 {
+  font-family: "Plus Jakarta Sans", "Inter", -apple-system, "Segoe UI", sans-serif;
+  letter-spacing: -0.01em;
 }

@@ -62,7 +62,9 @@ exports.getAppointment = async (req, res) => {
 // PATCH /doctors/appointments/:id - Update appointment (status/notes)
 exports.updateAppointment = async (req, res) => {
   const { status, notes } = req.body;
-  const DOCTOR_STATUSES = ['confirmed', 'done', 'cancelled'];
+  // Live DB enum uses 'completed'; API + docs use 'done' — accept both, store 'completed'.
+  const DOCTOR_STATUSES = ['confirmed', 'done', 'completed', 'cancelled'];
+  const toDb = (s) => (s === 'done' ? 'completed' : s);
   try {
     const docQ = await pool.query('SELECT id FROM doctors WHERE user_id=$1', [req.user.id]);
     if (!docQ.rows.length) return res.status(400).json({ error: 'Doctor profile not found' });
@@ -79,7 +81,7 @@ exports.updateAppointment = async (req, res) => {
     }
     const cleanNotes = notes !== undefined && notes !== null ? String(notes).trim() || null : null;
     // Preserve existing values when a field is omitted (COALESCE keeps old).
-    await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [nextStatus, cleanNotes, req.params.id]);
+    await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [nextStatus ? toDb(nextStatus) : null, cleanNotes, req.params.id]);
     res.json({ message: 'Appointment updated' });
   } catch (e) {
     console.error(e); res.status(500).json({ error: 'Failed to update appointment' });

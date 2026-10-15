@@ -46,13 +46,15 @@ exports.listInventory = async (req, res) => {
 };
 
 exports.createInventoryItem = async (req, res) => {
-  const { name, category, stock, reorder_level, unit } = req.body;
+  const { name, category, stock, reorder_level, unit, mrp, expiry_date } = req.body;
   const cleanName = name !== undefined && name !== null ? String(name).trim() : '';
   if (!cleanName) return res.status(400).json({ error: 'name is required' });
 
   const stockP = parseNonNegativeInt(stock ?? 0, 'stock');
   if (!stockP.ok) return res.status(400).json({ error: stockP.error });
-  const reorderP = parseNonNegativeInt(reorder_level ?? 0, 'reorder_level');
+  // Reorder threshold is optional now — defaults to 5 so low-stock alerts work
+  // without forcing staff to think about it on every add.
+  const reorderP = parseNonNegativeInt(reorder_level ?? 5, 'reorder_level');
   if (!reorderP.ok) return res.status(400).json({ error: reorderP.error });
 
   // Explicit guard: block negative stock even if DB lacks CHECK constraint.
@@ -60,10 +62,23 @@ exports.createInventoryItem = async (req, res) => {
     return res.status(400).json({ error: 'stock and reorder_level must not be negative' });
   }
 
+  let mrpVal = '0.00';
+  if (mrp !== undefined && mrp !== null && String(mrp).trim() !== '') {
+    const s = String(mrp).trim();
+    if (!/^\d+(\.\d{1,2})?$/.test(s)) return res.status(400).json({ error: 'mrp must be a non-negative amount with at most 2 decimals' });
+    mrpVal = Number(s).toFixed(2);
+  }
+  let expiryVal = null;
+  if (expiry_date !== undefined && expiry_date !== null && String(expiry_date).trim() !== '') {
+    const d = new Date(expiry_date);
+    if (Number.isNaN(d.getTime())) return res.status(400).json({ error: 'expiry_date must be a valid date' });
+    expiryVal = d.toISOString().slice(0, 10);
+  }
+
   try {
     const q = await pool.query(
-      `INSERT INTO inventory_items (name, category, stock, reorder_level, unit)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO inventory_items (name, category, stock, reorder_level, unit, mrp, expiry_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
        RETURNING *`,
       [
         cleanName,
@@ -71,6 +86,8 @@ exports.createInventoryItem = async (req, res) => {
         stockP.value,
         reorderP.value,
         unit !== undefined && unit !== null ? String(unit).trim() || null : null,
+        mrpVal,
+        expiryVal,
       ]
     );
     return res.json({ message: 'Inventory item created', item: q.rows[0] });
@@ -86,7 +103,7 @@ exports.createInventoryItem = async (req, res) => {
 
 exports.updateInventoryItem = async (req, res) => {
   const itemId = Number(req.params.id);
-  const { name, category, stock, reorder_level, unit } = req.body;
+  const { name, category, stock, reorder_level, unit, mrp, expiry_date, restock } = req.body;
   if (!Number.isInteger(itemId)) return res.status(400).json({ error: 'Invalid item id' });
 
   try {
@@ -103,7 +120,13 @@ exports.updateInventoryItem = async (req, res) => {
       updates.push(`category=$${values.length + 1}`);
       values.push(category === null ? null : String(category).trim() || null);
     }
-    if (stock !== undefined) {
+    // Restock: add to current stock instead of replacing it.
+    if (restock !== undefined) {
+      const n = Number(restock);
+      if (!Number.isInteger(n) || n < 1) return res.status(400).json({ error: 'restock must be a positive integer' });
+      updates.push(`stock=stock+$${values.length + 1}`);
+      values.push(n);
+    } else if (stock !== undefined) {
       const p = parseNonNegativeInt(stock, 'stock');
       if (!p.ok) return res.status(400).json({ error: p.error });
       if (p.value < 0) return res.status(400).json({ error: 'stock must not be negative' });
@@ -119,6 +142,23 @@ exports.updateInventoryItem = async (req, res) => {
     if (unit !== undefined) {
       updates.push(`unit=$${values.length + 1}`);
       values.push(unit === null ? null : String(unit).trim() || null);
+    }
+    if (mrp !== undefined) {
+      const s = String(mrp).trim();
+      if (s !== '' && !/^\d+(\.\d{1,2})?$/.test(s)) return res.status(400).json({ error: 'mrp must be a non-negative amount with at most 2 decimals' });
+      updates.push(`mrp=$${values.length + 1}`);
+      values.push(s === '' ? '0.00' : Number(s).toFixed(2));
+    }
+    if (expiry_date !== undefined) {
+      if (expiry_date === null || String(expiry_date).trim() === '') {
+        updates.push(`expiry_date=$${values.length + 1}`);
+        values.push(null);
+      } else {
+        const d = new Date(expiry_date);
+        if (Number.isNaN(d.getTime())) return res.status(400).json({ error: 'expiry_date must be a valid date' });
+        updates.push(`expiry_date=$${values.length + 1}`);
+        values.push(d.toISOString().slice(0, 10));
+      }
     }
 
     if (!updates.length) return res.status(400).json({ error: 'No fields to update' });

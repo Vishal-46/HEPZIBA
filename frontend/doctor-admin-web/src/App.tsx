@@ -36,38 +36,52 @@ export default function App() {
         path="/login"
         element={
           session ? (
-            <Navigate
-              to={session.user.role === 'admin' ? '/admin' : session.user.role === 'doctor' ? '/doctor' : '/login'}
-              replace
-            />
+            session.user.role === 'patient' ? (
+              <div className="authShell">
+                <div className="shell">
+                  <p className="errorText" role="alert">
+                    Only doctor/admin accounts can use this portal. You are signed in as
+                    patient — please use the mobile app.
+                  </p>
+                  <button className="primaryBtn" onClick={handleLogout}>
+                    Back to Login
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <Navigate
+                to={session.user.role === 'admin' ? '/admin' : '/doctor'}
+                replace
+              />
+            )
           ) : (
             <div className="authShell">
               <div className="authLayout">
                 <section className="authHero">
-                  <span className="clinicBadge">Hepziba Chest Clinic</span>
-                  <h1>Clinic Command Center</h1>
+                  <span className="clinicBadge">Hepziba Chest Clinic • Nagercoil</span>
+                  <h1>Staff Sign In</h1>
                   <p className="lead">
-                    Secure access for doctors and administrators to manage appointments, review
-                    patient updates, and keep the clinic running on time.
+                    Pulmonology clinic of Dr. T. Joseph Pratheeban. This portal is for
+                    doctors and administrators only — patients, please use the mobile app.
                   </p>
                   <div className="heroGrid">
                     <div className="heroCard">
-                      <h3>Doctor Desk</h3>
-                      <p>Track today&apos;s schedule, update visit status, and add prescriptions in one place.</p>
+                      <h3>Doctor</h3>
+                      <p>Today&apos;s appointments, visit status, and prescriptions with print.</p>
                     </div>
                     <div className="heroCard">
-                      <h3>Admin Control</h3>
-                      <p>Oversee staff accounts, inventory levels, and patient flow with live summaries.</p>
+                      <h3>Admin</h3>
+                      <p>Users, all appointments, inventory stock, and clinic hours.</p>
                     </div>
                   </div>
                   <div className="heroFooter">
                     <div>
-                      <p className="statValue">15 min</p>
-                      <p className="statLabel">Average check-in window</p>
+                      <p className="statValue">Pulmonology</p>
+                      <p className="statLabel">Chest care • Nagercoil</p>
                     </div>
                     <div>
-                      <p className="statValue">96%</p>
-                      <p className="statLabel">Same-day appointment closure</p>
+                      <p className="statValue">Staff only</p>
+                      <p className="statLabel">Doctor / admin accounts</p>
                     </div>
                   </div>
                 </section>

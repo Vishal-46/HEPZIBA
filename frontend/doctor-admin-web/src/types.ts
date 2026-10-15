@@ -33,7 +33,35 @@ export type AdminUser = {
   name: string;
   email?: string;
   role: string;
+  active?: boolean;
   aadhaar?: string | null;
+  [key: string]: unknown;
+};
+
+export type PatientRow = {
+  user_id: number;
+  patient_id: number | null;
+  name: string;
+  email?: string;
+  active?: boolean;
+  patient_code?: string | null;
+  age?: number | null;
+  sex?: string | null;
+  mobile?: string | null;
+  bp?: string | null;
+  spo2?: number | null;
+  [key: string]: unknown;
+};
+
+export type InvoiceRow = {
+  id: number;
+  patient_id: number;
+  appointment_id?: number | null;
+  doctor_name?: string | null;
+  total_amount: string | number;
+  invoice_date?: string;
+  patient_name?: string;
+  patient_code?: string | null;
   [key: string]: unknown;
 };
 
@@ -43,6 +71,9 @@ export type InventoryItem = {
   stock: number;
   reorder_level: number;
   unit: string;
+  category?: string | null;
+  mrp?: string | number | null;
+  expiry_date?: string | null;
   [key: string]: unknown;
 };
 

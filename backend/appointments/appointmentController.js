@@ -241,7 +241,7 @@ exports.cancelMyAppointment = async (req, res) => {
     const patient_id = q.rows[0].id;
     const appQ = await pool.query('SELECT id, status FROM appointments WHERE id=$1 AND patient_id=$2', [appointmentId, patient_id]);
     if (!appQ.rows.length) return res.status(404).json({ error: 'Appointment not found' });
-    if (appQ.rows[0].status === 'done' || appQ.rows[0].status === 'cancelled') {
+    if (appQ.rows[0].status === 'done' || appQ.rows[0].status === 'completed' || appQ.rows[0].status === 'cancelled') {
       return res.status(400).json({ error: `Cannot cancel appointment with status '${appQ.rows[0].status}'` });
     }
     await pool.query('UPDATE appointments SET status=$1 WHERE id=$2', ['cancelled', appointmentId]);

@@ -11,7 +11,7 @@ export function useDoctorAppointments() {
     setLoading(true);
     setError('');
     try {
-      const res = await apiClient.get<Appointment[]>('/appointments/for-me');
+      const res = await apiClient.get<Appointment[]>('/appointments/for-me?limit=100');
       setAppointments(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
       setError(apiErrorMessage(err, 'Failed to load appointments'));
@@ -57,5 +57,18 @@ export function useDoctorAppointments() {
     [load],
   );
 
-  return { appointments, loading, error, setError, load, updateStatus, createPrescription };
+  const getPrescription = useCallback(async (appointmentId: number) => {
+    try {
+      const res = await apiClient.get(`/prescriptions/appointment/${appointmentId}`);
+      return res.data as {
+        id: number;
+        notes?: string;
+        items: Array<{ medicine_name: string; dosage_morning?: boolean; dosage_afternoon?: boolean; dosage_evening?: boolean; dosage_night?: boolean; before_food?: boolean; after_food?: boolean }>;
+      };
+    } catch (err) {
+      throw new Error(apiErrorMessage(err, 'Failed to load prescription'), { cause: err });
+    }
+  }, []);
+
+  return { appointments, loading, error, setError, load, updateStatus, createPrescription, getPrescription };
 }

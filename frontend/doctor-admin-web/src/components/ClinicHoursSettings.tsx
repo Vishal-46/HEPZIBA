@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import apiClient, { apiErrorMessage } from '../utils/apiClient';
 import type { ClinicHours } from '../types';
 
@@ -21,43 +21,72 @@ function loadLocal(): ClinicHours {
   }
 }
 
-/**
- * Clinic-hours settings.
- * Persists to localStorage immediately (works offline) and attempts a
- * backend sync via POST /admin/settings when the endpoint exists.
- * TODO(backend): implement `POST /admin/settings` to persist clinic hours
- * server-side; until then the UI is backend-ready and degrades gracefully.
- */
 export default function ClinicHoursSettings() {
   const [form, setForm] = useState<ClinicHours>(() => loadLocal());
   const [status, setStatus] = useState('');
+  const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiClient.get<ClinicHours>('/admin/settings');
+        if (!alive) return;
+        const server = { ...DEFAULTS, ...(res.data as Partial<ClinicHours>) };
+        setForm(server);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(server));
+        } catch {
+          // ignore storage failures
+        }
+      } catch {
+        // Server unreachable — keep local copy, no scary TODO text.
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setStatus('');
+    setError('');
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
+      const res = await apiClient.post<{ clinicHours: ClinicHours }>('/admin/settings', {
+        clinicHours: form,
+      });
+      const saved = res.data?.clinicHours ?? form;
+      setForm({ ...DEFAULTS, ...saved });
       try {
-        await apiClient.post('/admin/settings', { clinicHours: form });
-        setStatus('Saved locally and synced to server.');
-      } catch (err) {
-        // Backend endpoint may not exist yet — local save still stands.
-        const msg = apiErrorMessage(err, '');
-        setStatus(
-          `Saved locally. Server sync pending (TODO: POST /admin/settings)${msg ? ` — ${msg}` : ''}`,
-        );
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+      } catch {
+        // ignore
       }
+      setStatus('Clinic hours saved to server.');
+    } catch (err) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
+      } catch {
+        // ignore
+      }
+      setError(`${apiErrorMessage(err, 'Could not save to server — kept locally.')}`);
     } finally {
       setSaving(false);
     }
   };
 
+  if (loading) return <section className="card" aria-label="Clinic hours settings"><p className="muted">Loading clinic hours…</p></section>;
+
   return (
     <section className="card" aria-label="Clinic hours settings">
       <h3>Clinic Hours</h3>
-      <p className="muted">Stored locally; syncs to POST /admin/settings when available.</p>
+      <p className="muted">Saved on the server — applies to staff scheduling.</p>
       <form className="settingsGrid" onSubmit={save}>
         <label>
           Opens
@@ -65,6 +94,7 @@ export default function ClinicHoursSettings() {
             type="time"
             value={form.openTime}
             onChange={(e) => setForm((p) => ({ ...p, openTime: e.target.value }))}
+            required
           />
         </label>
         <label>
@@ -73,6 +103,7 @@ export default function ClinicHoursSettings() {
             type="time"
             value={form.closeTime}
             onChange={(e) => setForm((p) => ({ ...p, closeTime: e.target.value }))}
+            required
           />
         </label>
         <label>
@@ -81,6 +112,7 @@ export default function ClinicHoursSettings() {
             value={form.days}
             onChange={(e) => setForm((p) => ({ ...p, days: e.target.value }))}
             placeholder="Mon–Sat"
+            required
           />
         </label>
         <label>
@@ -89,17 +121,15 @@ export default function ClinicHoursSettings() {
             inputMode="numeric"
             value={form.slotMinutes}
             onChange={(e) => setForm((p) => ({ ...p, slotMinutes: e.target.value }))}
+            required
           />
         </label>
         <button className="primaryBtn" type="submit" disabled={saving}>
           {saving ? 'Saving…' : 'Save Hours'}
         </button>
       </form>
-      {status && (
-        <p className="infoText" role="status">
-          {status}
-        </p>
-      )}
+      {status && <p className="infoText" role="status">{status}</p>}
+      {error && <p className="errorText" role="alert">{error}</p>}
     </section>
   );
 }

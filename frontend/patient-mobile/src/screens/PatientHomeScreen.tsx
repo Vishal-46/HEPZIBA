@@ -302,7 +302,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
     return appointments
       .filter((a) => {
         const d = getAppointmentDate(a);
-        return d && d.getTime() >= now && a.status !== 'done' && a.status !== 'cancelled';
+        return d && d.getTime() >= now && a.status !== 'done' && a.status !== 'completed' && a.status !== 'cancelled';
       })
       .sort((a, b) => (getAppointmentDate(a)?.getTime() || 0) - (getAppointmentDate(b)?.getTime() || 0))[0];
   }, [appointments]);

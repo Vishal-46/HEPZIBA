@@ -19,14 +19,18 @@ function moneyToCents(value) {
 }
 
 exports.createInvoice = async (req, res) => {
-  const { patient_id, appointment_id, doctor_name, items } = req.body;
+  const { patient_id, patient_code, appointment_id, doctor_name, items } = req.body;
 
-  if (!patient_id || !Array.isArray(items) || !items.length) {
-    return res.status(400).json({ error: 'patient_id and invoice items are required' });
+  if ((!patient_id && !patient_code) || !Array.isArray(items) || !items.length) {
+    return res.status(400).json({ error: 'patient (select from the picker) and invoice items are required' });
   }
-  const patientIdNum = Number(patient_id);
-  if (!Number.isInteger(patientIdNum)) {
-    return res.status(400).json({ error: 'Invalid patient_id' });
+  // Resolve the patient flexibly: patients.id, patient_code (HEP-XXXXX), or users.id.
+  // The old UI asked for a raw numeric id, so entering a login/user id failed
+  // with "Patient not found" — now every form resolves the code automatically.
+  let patientIdNum = Number(patient_id);
+  const codeRef = patient_code !== undefined && patient_code !== null ? String(patient_code).trim() : '';
+  if (!Number.isInteger(patientIdNum) && !codeRef) {
+    return res.status(400).json({ error: 'Invalid patient — pick a patient from the list, not a typed id.' });
   }
   let appointmentIdNum = null;
   if (appointment_id !== undefined && appointment_id !== null && appointment_id !== '') {
@@ -85,11 +89,25 @@ exports.createInvoice = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const patientQ = await client.query('SELECT id FROM patients WHERE id=$1', [patientIdNum]);
-    if (!patientQ.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Patient not found' });
+    // Resolve order: patients.id → patient_code → users.id (login id).
+    let resolved = null;
+    if (Number.isInteger(patientIdNum)) {
+      const byId = await client.query('SELECT id FROM patients WHERE id=$1', [patientIdNum]);
+      if (byId.rows.length) resolved = byId.rows[0].id;
     }
+    if (resolved === null && codeRef) {
+      const byCode = await client.query('SELECT id FROM patients WHERE patient_code=$1', [codeRef]);
+      if (byCode.rows.length) resolved = byCode.rows[0].id;
+    }
+    if (resolved === null && Number.isInteger(patientIdNum)) {
+      const byUser = await client.query('SELECT id FROM patients WHERE user_id=$1', [patientIdNum]);
+      if (byUser.rows.length) resolved = byUser.rows[0].id;
+    }
+    if (resolved === null) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Patient not found — pick the patient from the search list (code like HEP-XXXXX).' });
+    }
+    patientIdNum = resolved;
     if (appointmentIdNum !== null) {
       const appQ = await client.query('SELECT id FROM appointments WHERE id=$1', [appointmentIdNum]);
       if (!appQ.rows.length) {
@@ -120,6 +138,29 @@ exports.createInvoice = async (req, res) => {
           item.total,
         ]
       );
+    }
+
+    // Real-time stock: dispensing on an invoice consumes inventory.
+    // Matches by medicine name (case-insensitive); untracked charges
+    // (e.g. consultation fee) are left alone. Insufficient stock aborts
+    // the whole invoice so shelves never go negative silently.
+    for (const item of cleanItems) {
+      const invQ = await client.query(
+        'SELECT id, stock FROM inventory_items WHERE LOWER(name) = LOWER($1)',
+        [item.medicine_name]
+      );
+      if (!invQ.rows.length) continue;
+      const inv = invQ.rows[0];
+      if (inv.stock < item.quantity) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: `Insufficient stock for ${item.medicine_name} — have ${inv.stock}, need ${item.quantity}. Restock first.`,
+        });
+      }
+      await client.query('UPDATE inventory_items SET stock = stock - $1, updated_at = NOW() WHERE id = $2', [
+        item.quantity,
+        inv.id,
+      ]);
     }
 
     await client.query('COMMIT');
@@ -195,10 +236,10 @@ exports.getInvoiceById = async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch invoice' });
   }
 };
-
 exports.listInvoices = async (req, res) => {
   try {
     const { limit, offset } = parsePagination(req, 50);
+
     const q = req.query.q ? String(req.query.q).trim() : '';
 
     let whereClause = '';
@@ -252,4 +293,3 @@ exports.listInvoices = async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch invoices' });
   }
 };
-

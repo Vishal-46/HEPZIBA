@@ -2,11 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { useDoctorAppointments } from '../hooks/useDoctorData';
 import { usePaginatedSearch } from '../hooks/usePaginatedSearch';
 import type { MedicineRow, Patient } from '../types';
-import { formatDate, maskAadhaar } from '../utils/format';
+import { formatDate } from '../utils/format';
 import { printPrescription } from '../utils/prescriptionPrint';
 import EHRModal from './EHRModal';
 import { EmptyState, LoadingState, Pager, SearchInput } from './ListControls';
-
 
 const PAGE_SIZE = 8;
 
@@ -20,15 +19,31 @@ const blankMedicine = (): MedicineRow => ({
   af: true,
 });
 
+type History = {
+  id: number;
+  notes?: string;
+  items: Array<{
+    medicine_name: string;
+    dosage_morning?: boolean;
+    dosage_afternoon?: boolean;
+    dosage_evening?: boolean;
+    dosage_night?: boolean;
+    before_food?: boolean;
+    after_food?: boolean;
+  }>;
+} | null;
+
 export default function DoctorPanel() {
-  const { appointments, loading, error, setError, load, updateStatus, createPrescription } =
+  const { appointments, loading, error, setError, load, updateStatus, createPrescription, getPrescription } =
     useDoctorAppointments();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [status, setStatus] = useState('confirmed');
   const [notes, setNotes] = useState('');
   const [medicines, setMedicines] = useState<MedicineRow[]>([]);
   const [saving, setSaving] = useState(false);
-  const [showTodayOnly, setShowTodayOnly] = useState(true);
+  const [showTodayOnly, setShowTodayOnly] = useState(false);
+  const [history, setHistory] = useState<History>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [ehrPatient, setEhrPatient] = useState<Patient | null>(null);
 
   useEffect(() => {
@@ -43,8 +58,9 @@ export default function DoctorPanel() {
   const stats = useMemo(() => {
     const tally = { total: appointments.length, pending: 0, confirmed: 0, done: 0, cancelled: 0 };
     appointments.forEach((a) => {
-      const key = a.status as keyof typeof tally;
-      if (typeof a.status === 'string' && tally[key] !== undefined) tally[key] += 1;
+      const s = a.status === 'completed' ? 'done' : a.status;
+      const key = s as keyof typeof tally;
+      if (typeof s === 'string' && tally[key] !== undefined) tally[key] += 1;
     });
     return tally;
   }, [appointments]);
@@ -52,18 +68,41 @@ export default function DoctorPanel() {
   const todayList = useMemo(() => {
     const today = new Date().toDateString();
     return appointments.filter((a) => {
-      if (!a.scheduled_at) return false;
-      return new Date(a.scheduled_at).toDateString() === today;
+      const s = String(a.scheduled_at_effective ?? a.scheduled_at ?? '');
+      if (!s) return false;
+      return new Date(s).toDateString() === today;
     });
   }, [appointments]);
 
-  const sourceList = showTodayOnly && todayList.length > 0 ? todayList : appointments;
+  const sourceList = showTodayOnly ? todayList : appointments;
 
   const search = usePaginatedSearch(
     sourceList,
-    (a) => [a.patient_name, a.reason, a.status, String(a.id)],
+    (a) => [a.patient_name, a.reason, a.status, String(a.id), String(a.patient_code ?? ''), String(a.mobile ?? '')],
     PAGE_SIZE,
   );
+
+  useEffect(() => {
+    if (!selectedId) {
+      setHistory(null);
+      return;
+    }
+    let alive = true;
+    setHistoryLoading(true);
+    getPrescription(selectedId)
+      .then((h) => {
+        if (alive) setHistory(h);
+      })
+      .catch(() => {
+        if (alive) setHistory(null);
+      })
+      .finally(() => {
+        if (alive) setHistoryLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedId, getPrescription, appointments.length]);
 
   const addMedicineRow = () => setMedicines((prev) => [...prev, blankMedicine()]);
 
@@ -99,7 +138,8 @@ export default function DoctorPanel() {
     try {
       await createPrescription(selectedId, notes, medicines);
       setMedicines([]);
-      setNotes('');
+      const h = await getPrescription(selectedId).catch(() => null);
+      setHistory(h);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create prescription');
     } finally {
@@ -107,15 +147,18 @@ export default function DoctorPanel() {
     }
   };
 
+  const schedOf = (a: typeof selected) =>
+    String(a?.scheduled_at_effective ?? a?.scheduled_at ?? '');
+
   return (
     <div className="doctorLayout">
       <aside className="card doctorSidebar" aria-label="Doctor summary">
         <p className="clinicTag">Hepziba Chest Clinic</p>
         <h2>Doctor Desk</h2>
-        <p className="muted">Manage your schedule, update visit status, and add prescriptions.</p>
+        <p className="muted">Today&apos;s patient bookings, visit status, and prescriptions.</p>
         <div className="statGrid" role="list">
           <div className="statCard" role="listitem"><span>Total</span><strong>{stats.total}</strong></div>
-          <div className="statCard" role="listitem"><span>Confirmed</span><strong>{stats.confirmed}</strong></div>
+          <div className="statCard" role="listitem"><span>Today</span><strong>{todayList.length}</strong></div>
           <div className="statCard" role="listitem"><span>Pending</span><strong>{stats.pending}</strong></div>
           <div className="statCard" role="listitem"><span>Done</span><strong>{stats.done}</strong></div>
         </div>
@@ -133,14 +176,13 @@ export default function DoctorPanel() {
         <section className="card" aria-label="Schedule">
           <div className="sectionTop">
             <div>
-              <h2>Today&apos;s Schedule</h2>
-              <p className="muted">{new Date().toDateString()}</p>
+              <h2>Schedule</h2>
+              <p className="muted">{new Date().toDateString()} · {todayList.length} today · {appointments.length} total</p>
             </div>
-            <span className="pill">{todayList.length} visits</span>
           </div>
 
           <div className="listToolbar">
-            <SearchInput query={search.query} onQuery={search.setQuery} label="Search appointments…" />
+            <SearchInput query={search.query} onQuery={search.setQuery} label="Search name, code, mobile, id…" />
             <label className="checkRow">
               <input
                 type="checkbox"
@@ -157,7 +199,7 @@ export default function DoctorPanel() {
             <EmptyState
               message={
                 appointments.length === 0
-                  ? 'No appointments assigned yet.'
+                  ? 'No appointments assigned yet — patient bookings from the mobile app will appear here.'
                   : 'No appointments match your search.'
               }
             />
@@ -171,19 +213,24 @@ export default function DoctorPanel() {
                     className={`appointmentRow ${selectedId === a.id ? 'active' : ''}`}
                     onClick={() => {
                       setSelectedId(a.id);
-                      setStatus(a.status || 'confirmed');
+                      setStatus(['confirmed', 'done', 'cancelled'].includes(String(a.status)) ? String(a.status) : 'confirmed');
                       setNotes(typeof a.notes === 'string' ? a.notes : '');
+                      setMedicines([]);
                     }}
                     aria-pressed={selectedId === a.id}
                   >
                     <div>
-                      <strong>{a.patient_name || 'Patient'}</strong>
-                      <span className="appointmentMeta">{formatDate(a.scheduled_at)}</span>
+                      <strong>{String(a.patient_name || 'Patient')}</strong>
+                      {a.patient_code ? <span className="appointmentMeta">Code: {String(a.patient_code)}</span> : null}
                       <span className="appointmentMeta">
-                        Aadhaar: {maskAadhaar(a.patient_aadhaar ?? a.aadhaar)}
+                        {formatDate(String(a.scheduled_at_effective ?? a.scheduled_at ?? ''))}
+                        {a.token_number ? ` · Token ${String(a.token_number)}` : ''}
+                      </span>
+                      <span className="appointmentMeta">
+                        {a.age ? `${String(a.age)}y` : ''}{a.sex ? ` · ${String(a.sex)}` : ''}{a.mobile ? ` · ${String(a.mobile)}` : ''}
                       </span>
                     </div>
-                    <span className={`pill status ${a.status || 'pending'}`}>{a.status || 'pending'}</span>
+                    <span className={`pill status ${a.status || 'pending'}`}>{String(a.status || 'pending')}</span>
                   </button>
                 ))}
               </div>
@@ -205,69 +252,78 @@ export default function DoctorPanel() {
               <div className="detailGrid">
                 <div>
                   <p className="label">Patient</p>
-                  <p><strong>{selected.patient_name || 'Patient'}</strong></p>
-                  <p className="muted">Aadhaar: {maskAadhaar(selected.patient_aadhaar ?? selected.aadhaar)}</p>
+                  <p>{String(selected.patient_name || 'Patient')}</p>
+                  <p className="muted">
+                    {selected.patient_code ? `Code ${String(selected.patient_code)} · ` : ''}
+                    {selected.age ? `${String(selected.age)}y · ` : ''}
+                    {selected.sex ? `${String(selected.sex)} · ` : ''}
+                    {selected.mobile ? String(selected.mobile) : 'No mobile'}
+                  </p>
+                  {(selected.bp || selected.spo2) ? (
+                    <p className="muted">BP {String(selected.bp ?? '—')} · SpO2 {String(selected.spo2 ?? '—')}</p>
+                  ) : null}
                   <button
                     type="button"
                     className="ghostBtn"
-                    style={{ fontSize: '12px', padding: '3px 8px', marginTop: '6px' }}
-                    onClick={() => {
+                    style={{ marginTop: 8 }}
+                    onClick={() =>
                       setEhrPatient({
                         id: Number(selected.patient_id) || selected.id,
                         name: String(selected.patient_name || 'Patient'),
                         patient_code: typeof selected.patient_code === 'string' ? selected.patient_code : undefined,
                         mobile: typeof selected.mobile === 'string' ? selected.mobile : undefined,
-                        aadhar_number: typeof selected.patient_aadhaar === 'string' ? selected.patient_aadhaar : undefined,
                         bp: typeof selected.bp === 'string' ? selected.bp : undefined,
                         spo2: typeof selected.spo2 === 'number' || typeof selected.spo2 === 'string' ? selected.spo2 : undefined,
                         age: typeof selected.age === 'number' ? selected.age : undefined,
                         sex: typeof selected.sex === 'string' ? selected.sex : undefined,
-                      });
-                    }}
+                      })
+                    }
                   >
-                    🩺 View Full EHR
+                    View full EHR
                   </button>
                 </div>
                 <div>
-                  <p className="label">Schedule & Token</p>
-                  <p><strong>Token #{String(selected.token_number || selected.id)}</strong></p>
-                  <p className="muted">{formatDate(selected.scheduled_at)}</p>
+                  <p className="label">Schedule</p>
+                  <p>{formatDate(schedOf(selected))}</p>
+                  {selected.token_number ? <p className="muted">Token {String(selected.token_number)}</p> : null}
                 </div>
                 <div>
-                  <p className="label">Reason / Clinical Note</p>
-                  <p>{selected.reason || 'Respiratory consultation'}</p>
+                  <p className="label">Reason</p>
+                  <p>{String(selected.reason || 'Respiratory consultation')}</p>
                 </div>
                 <div>
                   <p className="label">Status</p>
                   <select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Visit status">
-                    <option value="pending">pending</option>
                     <option value="confirmed">confirmed</option>
                     <option value="done">done</option>
                     <option value="cancelled">cancelled</option>
                   </select>
+                  <p className="muted" style={{ marginTop: 4 }}>Current: {String(selected.status || 'pending')}</p>
                 </div>
               </div>
-
-              {(Boolean(selected.bp) || Boolean(selected.spo2)) && (
-                <div style={{ background: '#f0f9ff', padding: '8px 14px', borderRadius: '6px', border: '1px solid #bae6fd', margin: '10px 0', display: 'flex', gap: '20px' }}>
-                  {Boolean(selected.bp) && <span><strong>Blood Pressure:</strong> {String(selected.bp)}</span>}
-                  {Boolean(selected.spo2) && (
-                    <span>
-                      <strong>SpO2:</strong>{' '}
-                      <span style={{ color: Number(selected.spo2) < 95 ? '#dc2626' : '#16a34a', fontWeight: 'bold' }}>
-                        {String(selected.spo2)}%
-                      </span>
-                    </span>
-                  )}
-                </div>
-              )}
               <label>
                 Notes
                 <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
               </label>
 
               <div className="sectionTop" style={{ marginTop: '15px' }}>
-                <h4>Medicines</h4>
+                <h4>Existing prescription</h4>
+              </div>
+              {historyLoading ? (
+                <p className="muted">Loading prescription…</p>
+              ) : history ? (
+                <div className="miniRow" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                  <span>Prescription #{history.id}{history.notes ? ` — ${history.notes}` : ''}</span>
+                  {history.items.map((it, idx) => (
+                    <span key={idx} className="muted">· {it.medicine_name}</span>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No prescription saved for this visit yet.</p>
+              )}
+
+              <div className="sectionTop" style={{ marginTop: '15px' }}>
+                <h4>New prescription</h4>
                 <button type="button" className="ghostBtn" onClick={addMedicineRow}>
                   + Add Medicine
                 </button>
@@ -336,14 +392,7 @@ export default function DoctorPanel() {
           )}
         </section>
       </div>
-
-      {ehrPatient && (
-        <EHRModal
-          patient={ehrPatient}
-          onClose={() => setEhrPatient(null)}
-        />
-      )}
+      {ehrPatient && <EHRModal patient={ehrPatient} onClose={() => setEhrPatient(null)} />}
     </div>
   );
 }
-
