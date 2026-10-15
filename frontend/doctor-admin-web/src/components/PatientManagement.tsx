@@ -129,6 +129,93 @@ export default function PatientManagement({
     }
   };
 
+  // Edit patient state (admin/nurse updates demographics + clinic vitals)
+  const [editing, setEditing] = useState<Patient | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editForm, setEditForm] = useState({
+    name: '',
+    email: '',
+    age: '',
+    sex: 'Male',
+    mobile: '',
+    address: '',
+    aadhar_number: '',
+    height_cm: '',
+    weight_kg: '',
+    bp: '',
+    spo2: '',
+  });
+
+  const openEdit = (p: Patient) => {
+    setEditForm({
+      name: p.name ?? '',
+      email: p.email ?? '',
+      age: p.age !== undefined && p.age !== null ? String(p.age) : '',
+      sex: p.sex ?? 'Male',
+      mobile: p.mobile ?? '',
+      address: p.address ?? '',
+      aadhar_number: p.aadhar_number ?? '',
+      height_cm: p.height_cm !== undefined && p.height_cm !== null ? String(p.height_cm) : '',
+      weight_kg: p.weight_kg !== undefined && p.weight_kg !== null ? String(p.weight_kg) : '',
+      bp: p.bp ?? '',
+      spo2: p.spo2 !== undefined && p.spo2 !== null ? String(p.spo2) : '',
+    });
+    setEditing(p);
+    setError('');
+    setSuccess('');
+  };
+
+  const handleEditSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    if (!editForm.name.trim()) {
+      setError('Patient name is required');
+      return;
+    }
+    if (editForm.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editForm.email.trim())) {
+      setError('Invalid email address');
+      return;
+    }
+    if (editForm.mobile.trim() && !/^\d{10,15}$/.test(editForm.mobile.trim())) {
+      setError('Mobile number must be 10-15 digits');
+      return;
+    }
+    if (editForm.aadhar_number.trim() && !/^\d{12}$/.test(editForm.aadhar_number.trim())) {
+      setError('Aadhaar number must be exactly 12 digits');
+      return;
+    }
+    if (editForm.spo2.trim() && (Number(editForm.spo2) < 0 || Number(editForm.spo2) > 100)) {
+      setError('SpO2 must be between 0 and 100%');
+      return;
+    }
+    setEditSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const pid = (editing as Patient & { patient_id?: number }).patient_id ?? editing.id;
+      const blankToUndef = (v: string) => (v.trim() === '' ? undefined : v.trim());
+      await apiClient.put(`/patients/${pid}`, {
+        name: editForm.name.trim(),
+        email: blankToUndef(editForm.email),
+        age: blankToUndef(editForm.age),
+        sex: editForm.sex,
+        mobile: blankToUndef(editForm.mobile),
+        address: blankToUndef(editForm.address),
+        aadhar_number: blankToUndef(editForm.aadhar_number),
+        height_cm: blankToUndef(editForm.height_cm),
+        weight_kg: blankToUndef(editForm.weight_kg),
+        bp: blankToUndef(editForm.bp),
+        spo2: blankToUndef(editForm.spo2),
+      });
+      setSuccess(`Updated ${editForm.name.trim()} — vitals saved${editForm.bp.trim() || editForm.spo2.trim() ? ` (BP ${editForm.bp.trim() || '—'}, SpO2 ${editForm.spo2.trim() || '—'})` : ''}.`);
+      setEditing(null);
+      loadPatients();
+    } catch (err) {
+      setError(apiErrorMessage(err, 'Failed to update patient'));
+    } finally {
+      setEditSaving(false);
+    }
+  };
   // Pagination
   const totalPages = Math.max(1, Math.ceil(patients.length / PAGE_SIZE));
   const currentPatients = patients.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
@@ -220,6 +307,14 @@ export default function PatientManagement({
                       </td>
                       <td>
                         <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            className="ghostBtn"
+                            style={{ padding: '4px 8px', fontSize: '12px' }}
+                            onClick={() => openEdit(p)}
+                            title="Edit details & clinic vitals (BP, SpO2)"
+                          >
+                            Edit
+                          </button>
                           {onViewEHR && (
                             <button
                               className="ghostBtn"
@@ -420,6 +515,149 @@ export default function PatientManagement({
                 </button>
                 <button type="submit" className="primaryBtn" disabled={saving}>
                   {saving ? 'Registering…' : 'Save Patient'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Patient Modal (admin/nurse updates demographics + clinic vitals) */}
+      {editing && (
+        <div className="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="editTitle">
+          <div className="modalContent" style={{ maxWidth: '640px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 id="editTitle" style={{ margin: 0 }}>Edit Patient — {editing.name}</h3>
+              <button className="ghostBtn" onClick={() => setEditing(null)} type="button">✕</button>
+            </div>
+
+            <form onSubmit={handleEditSave}>
+              <div className="grid2" style={{ gap: '12px', marginBottom: '12px' }}>
+                <div>
+                  <label style={{ fontSize: '13px', fontWeight: 600 }}>Full Name *</label>
+                  <input
+                    required
+                    placeholder="Patient Name"
+                    value={editForm.name}
+                    onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: '13px', fontWeight: 600 }}>Mobile Number</label>
+                  <input
+                    placeholder="10-15 digits"
+                    value={editForm.mobile}
+                    onChange={(e) => setEditForm({ ...editForm, mobile: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ fontSize: '13px', fontWeight: 600 }}>Email (for app login)</label>
+                <input
+                  type="email"
+                  placeholder="patient@email.com"
+                  value={editForm.email}
+                  onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                />
+              </div>
+
+              <div className="grid3" style={{ gap: '12px', marginBottom: '12px' }}>
+                <div>
+                  <label style={{ fontSize: '13px', fontWeight: 600 }}>Age</label>
+                  <input
+                    type="number"
+                    placeholder="Years"
+                    min="0"
+                    max="125"
+                    value={editForm.age}
+                    onChange={(e) => setEditForm({ ...editForm, age: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: '13px', fontWeight: 600 }}>Sex</label>
+                  <select
+                    className="proSelect"
+                    style={{ width: '100%', minWidth: 0 }}
+                    value={editForm.sex}
+                    onChange={(e) => setEditForm({ ...editForm, sex: e.target.value })}
+                  >
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '13px', fontWeight: 600 }}>Aadhaar Number</label>
+                  <input
+                    placeholder="12 digits"
+                    maxLength={12}
+                    value={editForm.aadhar_number}
+                    onChange={(e) => setEditForm({ ...editForm, aadhar_number: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ fontSize: '13px', fontWeight: 600 }}>Address</label>
+                <input
+                  placeholder="Residential Address"
+                  value={editForm.address}
+                  onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
+                />
+              </div>
+
+              <div style={{ background: '#eef7f2', padding: '12px', borderRadius: '8px', border: '1px solid #bfe3cf', marginBottom: '16px' }}>
+                <h4 style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#147a5c' }}>Clinic vitals (measured at visit)</h4>
+                <div className="grid4" style={{ gap: '10px' }}>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>SpO2 (%)</label>
+                    <input
+                      type="number"
+                      placeholder="e.g. 98"
+                      min="0"
+                      max="100"
+                      value={editForm.spo2}
+                      onChange={(e) => setEditForm({ ...editForm, spo2: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Blood Pressure</label>
+                    <input
+                      placeholder="e.g. 120/80"
+                      value={editForm.bp}
+                      onChange={(e) => setEditForm({ ...editForm, bp: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Height (cm)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      placeholder="e.g. 170"
+                      value={editForm.height_cm}
+                      onChange={(e) => setEditForm({ ...editForm, height_cm: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Weight (kg)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      placeholder="e.g. 68"
+                      value={editForm.weight_kg}
+                      onChange={(e) => setEditForm({ ...editForm, weight_kg: e.target.value })}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button type="button" className="ghostBtn" onClick={() => setEditing(null)} disabled={editSaving}>
+                  Cancel
+                </button>
+                <button type="submit" className="primaryBtn" disabled={editSaving}>
+                  {editSaving ? 'Saving…' : 'Save Changes'}
                 </button>
               </div>
             </form>
