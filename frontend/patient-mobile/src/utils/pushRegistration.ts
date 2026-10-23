@@ -93,36 +93,42 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
     await sendTelemetry({ stage: 'start', isPhysDevice, deviceName });
 
     const Notifications = await import('expo-notifications');
-    const { status: existing } = await Notifications.getPermissionsAsync();
-    let finalStatus = existing;
-    if (existing !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
+    const existing = await Notifications.getPermissionsAsync();
+    let isGranted = Boolean(existing.granted || existing.status === 'granted');
+    let finalStatus = existing.status;
+    if (!isGranted) {
+      const requested = await Notifications.requestPermissionsAsync();
+      finalStatus = requested.status;
+      isGranted = Boolean(requested.granted || requested.status === 'granted');
     }
 
-    await sendTelemetry({ stage: 'permission_checked', finalStatus, isPhysDevice });
+    await sendTelemetry({ stage: 'permission_checked', finalStatus, isGranted, isPhysDevice });
 
-    if (finalStatus !== 'granted') {
+    if (!isGranted) {
       console.warn('Notification permission not granted:', finalStatus);
       await sendTelemetry({ stage: 'permission_denied', finalStatus });
       return {
         success: false,
         token: null,
         permissionStatus: finalStatus,
-        errorMessage: 'Notification permission was denied. Please allow notifications in device settings.',
+        errorMessage: 'Notification permission is disabled in phone settings. Please enable it and tap Refresh.',
       };
     }
 
     if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('default', {
-        name: 'Visit updates',
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        lightColor: '#0ea5e9',
-        enableVibrate: true,
-        enableLights: true,
-        showBadge: true,
-      });
+      try {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'Visit updates',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#0ea5e9',
+          enableVibrate: true,
+          enableLights: true,
+          showBadge: true,
+        });
+      } catch (chanErr: any) {
+        console.warn('setNotificationChannelAsync notice:', chanErr?.message);
+      }
     }
 
     const Constants = (await import('expo-constants')).default;

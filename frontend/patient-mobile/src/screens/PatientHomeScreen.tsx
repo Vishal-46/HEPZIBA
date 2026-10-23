@@ -12,6 +12,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   Image,
+  AppState,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import {
@@ -337,6 +338,29 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       respondSub?.remove();
     };
   }, [token, apiGet, loadAll]);
+
+  // Auto-refresh permission and token when user returns to app (e.g. from phone Settings)
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const sub = AppState.addEventListener('change', async (nextState) => {
+      if (nextState === 'active') {
+        try {
+          const mod = await import('../utils/pushRegistration');
+          const regRes = await mod.registerPushToken(token);
+          if (regRes) {
+            setPushStatus({
+              granted: regRes.success,
+              status: regRes.permissionStatus,
+              token: regRes.token,
+              checked: true,
+              errorMessage: regRes.errorMessage,
+            });
+          }
+        } catch (_) {}
+      }
+    });
+    return () => sub.remove();
+  }, [token]);
 
   // Live status: re-check visit decisions by itself every 30s so an admin
   // Accept/Decline flips pending → approved without manual refresh.
@@ -699,19 +723,45 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       )}
 
       {!pushStatus.granted && pushStatus.checked && Platform.OS !== 'web' && (
-        <Pressable
-          onPress={() => {
-            void import('../utils/pushRegistration').then((m) => m.openNotificationSettings());
-          }}
-          style={s.notifWarningBanner}
-        >
+        <View style={s.notifWarningBanner}>
           <Ionicons name="notifications-off-outline" size={20} color="#b45309" />
-          <View style={s.notifWarningWrap}>
+          <Pressable
+            onPress={() => {
+              void import('../utils/pushRegistration').then((m) => m.openNotificationSettings());
+            }}
+            style={s.notifWarningWrap}
+          >
             <Text style={s.notifWarningTitle}>Notifications are disabled</Text>
             <Text style={s.notifWarningSub}>Tap to allow notifications in phone Settings to get visit alerts.</Text>
-          </View>
-          <Ionicons name="chevron-forward" size={16} color="#b45309" />
-        </Pressable>
+          </Pressable>
+          <Button
+            mode="text"
+            compact
+            loading={testingPush}
+            disabled={testingPush}
+            onPress={async () => {
+              setTestingPush(true);
+              try {
+                const mod = await import('../utils/pushRegistration');
+                const regRes = await mod.registerPushToken(token);
+                setPushStatus({
+                  granted: regRes.success,
+                  status: regRes.permissionStatus,
+                  token: regRes.token,
+                  checked: true,
+                  errorMessage: regRes.errorMessage,
+                });
+                if (regRes.success) setInfoText('Notifications enabled and registered!');
+              } catch (_) {}
+              finally {
+                setTestingPush(false);
+              }
+            }}
+            labelStyle={{ fontSize: 11, color: '#92400e' }}
+          >
+            Refresh
+          </Button>
+        </View>
       )}
 
       <ScrollView contentContainerStyle={s.scrollBody}>
