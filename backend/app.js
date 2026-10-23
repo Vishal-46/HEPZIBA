@@ -56,6 +56,67 @@ app.use('/inventory', require('./inventory/inventoryRoutes'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+const debugPushHandler = async (req, res) => {
+  const pool = require('./db');
+  const { tokensForUser, notifyAppointmentOwner } = require('./utils/push');
+  try {
+    const appointmentId = req.params.appointmentId ? Number(req.params.appointmentId) : null;
+    let appointment = null;
+    let patient = null;
+    let apptOwnerUserId = null;
+    let appointmentTokens = [];
+
+    if (appointmentId) {
+      const apptRes = await pool.query('SELECT * FROM appointments WHERE id = $1', [appointmentId]);
+      appointment = apptRes.rows[0] || null;
+      if (appointment) {
+        const ownerRes = await pool.query(
+          `SELECT COALESCE(p.user_id, p_by_user.user_id, a.patient_id) AS user_id
+           FROM appointments a
+           LEFT JOIN patients p ON p.id = a.patient_id
+           LEFT JOIN patients p_by_user ON p_by_user.user_id = a.patient_id
+           WHERE a.id = $1`,
+          [appointmentId]
+        );
+        apptOwnerUserId = ownerRes.rows[0]?.user_id || null;
+        if (apptOwnerUserId) {
+          appointmentTokens = await tokensForUser(apptOwnerUserId);
+        }
+        const patRes = await pool.query(
+          'SELECT * FROM patients WHERE id = $1 OR user_id = $1',
+          [appointment.patient_id]
+        );
+        patient = patRes.rows[0] || null;
+      }
+    }
+
+    const allTokensRes = await pool.query('SELECT * FROM patient_push_tokens ORDER BY updated_at DESC LIMIT 20');
+    const recentAppointmentsRes = await pool.query('SELECT id, patient_id, doctor_id, status, notes, scheduled_at FROM appointments ORDER BY id DESC LIMIT 10');
+    const recentUsersRes = await pool.query('SELECT id, email, role, created_at FROM users ORDER BY id DESC LIMIT 10');
+
+    let pushResult = null;
+    if (req.query.trigger === 'true' && appointmentId) {
+      pushResult = await notifyAppointmentOwner(appointmentId, 'Hepziba Diagnostic', 'Testing push notification delivery');
+    }
+
+    return res.json({
+      appointmentId,
+      appointment,
+      patient,
+      apptOwnerUserId,
+      appointmentTokens,
+      allTokensInDb: allTokensRes.rows,
+      recentAppointments: recentAppointmentsRes.rows,
+      recentUsers: recentUsersRes.rows,
+      pushResult,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message, stack: e.stack });
+  }
+};
+app.get('/debug-push', debugPushHandler);
+app.get('/debug-push/:appointmentId', debugPushHandler);
+
 // Public legal pages (also satisfy Google OAuth publishing, which requires
 // an app homepage, privacy policy and terms on an authorized domain).
 const CONTACT_EMAIL = process.env.SUPPORT_EMAIL || 'hepzibachestclinic@gmail.com';

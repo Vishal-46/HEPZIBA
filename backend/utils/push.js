@@ -30,7 +30,7 @@ async function sendPush(tokens, title, body, data = {}) {
   const tokenList = (Array.isArray(tokens) ? tokens : [tokens]).filter(isExpoPushToken);
   if (!tokenList.length) {
     console.log('push: no valid tokens to send to');
-    return;
+    return { ok: false, error: 'No valid tokens provided', tokens: [] };
   }
   const messages = tokenList.map((to) => ({
     to,
@@ -53,30 +53,31 @@ async function sendPush(tokens, title, body, data = {}) {
       body: JSON.stringify(messages),
     });
     const text = await res.text();
+    let payload = null;
+    try { payload = JSON.parse(text); } catch (_) {}
     if (!res.ok) {
       console.error('push send failed:', res.status, text);
     } else {
       console.log('push send ok:', text);
-      try {
-        const payload = JSON.parse(text);
-        if (payload && Array.isArray(payload.data)) {
-          payload.data.forEach((ticket, idx) => {
-            if (ticket.status === 'error') {
-              console.error(`push ticket error for token ${tokenList[idx]}:`, ticket.message, ticket.details);
-              if (ticket.details && ticket.details.error === 'DeviceNotRegistered') {
-                pool.query('DELETE FROM patient_push_tokens WHERE token=$1', [tokenList[idx]]).catch(() => {});
-              }
+      if (payload && Array.isArray(payload.data)) {
+        payload.data.forEach((ticket, idx) => {
+          if (ticket.status === 'error') {
+            console.error(`push ticket error for token ${tokenList[idx]}:`, ticket.message, ticket.details);
+            if (ticket.details && ticket.details.error === 'DeviceNotRegistered') {
+              pool.query('DELETE FROM patient_push_tokens WHERE token=$1', [tokenList[idx]]).catch(() => {});
             }
-          });
-        }
-      } catch (_) {}
+          }
+        });
+      }
     }
+    return { ok: res.ok, status: res.status, raw: text, payload };
   } catch (e) {
     console.error('push send error:', e.message);
+    return { ok: false, error: e.message };
   }
 }
 
-// Notify the patient that owns an appointment. Fire-and-forget.
+// Notify the patient that owns an appointment.
 async function notifyAppointmentOwner(appointmentId, title, body) {
   try {
     console.log(`push: lookup owner for appointment ${appointmentId}...`);
@@ -90,18 +91,20 @@ async function notifyAppointmentOwner(appointmentId, title, body) {
     );
     if (!r.rows.length || !r.rows[0].user_id) {
       console.log('push: no patient user found for appointment', appointmentId);
-      return;
+      return { ok: false, reason: 'Appointment owner not found', appointmentId };
     }
     const userId = r.rows[0].user_id;
     const tokens = await tokensForUser(userId);
     if (!tokens.length) {
       console.log('push: no push tokens found for user', userId);
-      return;
+      return { ok: false, reason: 'No push tokens found for user', userId, appointmentId };
     }
     console.log(`push: sending notification to user ${userId} (${tokens.length} token(s)). Title: "${title}"`);
-    await sendPush(tokens, title, body, { appointmentId });
+    const sendRes = await sendPush(tokens, title, body, { appointmentId });
+    return { ok: true, userId, tokens, sendResult: sendRes };
   } catch (e) {
     console.error('notify failed:', e.message);
+    return { ok: false, error: e.message, appointmentId };
   }
 }
 
