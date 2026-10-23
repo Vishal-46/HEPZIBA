@@ -180,13 +180,15 @@ exports.updateAppointmentStatus = async (req, res) => {
       const { notifyAppointmentOwner } = require('../utils/push');
       const msg = cleanNotes || '';
       if (finalStatus === 'confirmed') {
-        void notifyAppointmentOwner(appointmentId, 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
+        await notifyAppointmentOwner(appointmentId, 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
       } else if (finalStatus === 'cancelled') {
-        void notifyAppointmentOwner(appointmentId, 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
+        await notifyAppointmentOwner(appointmentId, 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
       } else if (finalStatus === 'done') {
-        void notifyAppointmentOwner(appointmentId, 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
+        await notifyAppointmentOwner(appointmentId, 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
       }
-    } catch (_) { /* ignore */ }
+    } catch (pushErr) {
+      console.error('Push notification failed:', pushErr);
+    }
 
     res.json({ message: 'Appointment updated', appointment: q.rows[0] });
   } catch (e) {

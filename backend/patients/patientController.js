@@ -26,6 +26,24 @@ exports.savePushToken = async (req, res) => {
   }
 };
 
+// Send a test push notification to this patient's registered device(s)
+exports.testPush = async (req, res) => {
+  try {
+    const { tokensForUser, sendPush } = require('../utils/push');
+    const tokens = await tokensForUser(req.user.id);
+    if (!tokens.length) {
+      return res.status(400).json({
+        error: 'No push tokens found for your account. Please open the mobile app on a physical device and ensure notifications are enabled.',
+      });
+    }
+    await sendPush(tokens, 'Hepziba Clinic', 'Test Notification: Push notifications are working properly!');
+    return res.json({ message: 'Test notification sent successfully.', tokens });
+  } catch (e) {
+    console.error('testPush error:', e);
+    return res.status(500).json({ error: 'Failed to send test push', details: e.message });
+  }
+};
+
 // Get profile of the logged-in patient
 exports.getMe = async (req, res) => {
   // req.user is set by roleAuth middleware

@@ -126,13 +126,15 @@ exports.updateAppointment = async (req, res) => {
       const msg = cleanNotes || '';
       const done = nextStatus === 'done' || nextStatus === 'completed';
       if (nextStatus === 'confirmed') {
-        void notifyAppointmentOwner(Number(req.params.id), 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
+        await notifyAppointmentOwner(Number(req.params.id), 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
       } else if (nextStatus === 'cancelled') {
-        void notifyAppointmentOwner(Number(req.params.id), 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
+        await notifyAppointmentOwner(Number(req.params.id), 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
       } else if (done) {
-        void notifyAppointmentOwner(Number(req.params.id), 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
+        await notifyAppointmentOwner(Number(req.params.id), 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
       }
-    } catch (_) { /* ignore */ }
+    } catch (pushErr) {
+      console.error('Doctor push notification failed:', pushErr);
+    }
     res.json({ message: 'Appointment updated' });
   } catch (e) {
     console.error('Unexpected error in doctor updateAppointmentStatus:', e);

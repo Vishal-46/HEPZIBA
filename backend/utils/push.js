@@ -12,7 +12,13 @@ function isExpoPushToken(token) {
 
 async function tokensForUser(userId) {
   try {
-    const r = await pool.query('SELECT token FROM patient_push_tokens WHERE user_id=$1', [userId]);
+    const r = await pool.query(
+      `SELECT DISTINCT token FROM patient_push_tokens
+       WHERE user_id = $1
+          OR user_id IN (SELECT id FROM patients WHERE user_id = $1)
+          OR user_id IN (SELECT user_id FROM patients WHERE id = $1)`,
+      [userId]
+    );
     return r.rows.map((x) => x.token).filter(Boolean);
   } catch (e) {
     console.error('push tokensForUser error:', e.message);
@@ -34,6 +40,7 @@ async function sendPush(tokens, title, body, data = {}) {
     channelId: 'default',
     priority: 'high',
     data,
+    _displayInForeground: true,
   }));
   try {
     const res = await fetch('https://exp.host/--/api/v2/push/send', {
@@ -72,19 +79,26 @@ async function sendPush(tokens, title, body, data = {}) {
 // Notify the patient that owns an appointment. Fire-and-forget.
 async function notifyAppointmentOwner(appointmentId, title, body) {
   try {
+    console.log(`push: lookup owner for appointment ${appointmentId}...`);
     const r = await pool.query(
-      `SELECT p.user_id FROM appointments a JOIN patients p ON p.id = a.patient_id WHERE a.id=$1`,
+      `SELECT COALESCE(p.user_id, p_by_user.user_id, a.patient_id) AS user_id
+       FROM appointments a
+       LEFT JOIN patients p ON p.id = a.patient_id
+       LEFT JOIN patients p_by_user ON p_by_user.user_id = a.patient_id
+       WHERE a.id = $1`,
       [appointmentId]
     );
     if (!r.rows.length || !r.rows[0].user_id) {
       console.log('push: no patient user found for appointment', appointmentId);
       return;
     }
-    const tokens = await tokensForUser(r.rows[0].user_id);
+    const userId = r.rows[0].user_id;
+    const tokens = await tokensForUser(userId);
     if (!tokens.length) {
-      console.log('push: no push tokens for user', r.rows[0].user_id);
+      console.log('push: no push tokens found for user', userId);
       return;
     }
+    console.log(`push: sending notification to user ${userId} (${tokens.length} token(s)). Title: "${title}"`);
     await sendPush(tokens, title, body, { appointmentId });
   } catch (e) {
     console.error('notify failed:', e.message);
