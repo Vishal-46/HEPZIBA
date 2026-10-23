@@ -13,16 +13,33 @@ exports.savePushToken = async (req, res) => {
     return res.status(400).json({ error: 'Invalid push token' });
   }
   try {
-    await pool.query(
-      `INSERT INTO patient_push_tokens (user_id, token, updated_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, updated_at = NOW()`,
-      [req.user.id, token]
-    );
+    // Ensure table exists
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS patient_push_tokens (
+        user_id INTEGER PRIMARY KEY,
+        token TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `).catch(() => {});
+
+    try {
+      await pool.query(
+        `INSERT INTO patient_push_tokens (user_id, token, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, updated_at = NOW()`,
+        [req.user.id, token]
+      );
+    } catch (confErr) {
+      console.warn('savePushToken on conflict error, attempting update/insert fallback:', confErr.message);
+      const upd = await pool.query('UPDATE patient_push_tokens SET token=$1, updated_at=NOW() WHERE user_id=$2', [token, req.user.id]);
+      if (upd.rowCount === 0) {
+        await pool.query('INSERT INTO patient_push_tokens (user_id, token, updated_at) VALUES ($1, $2, NOW())', [req.user.id, token]);
+      }
+    }
     console.log(`Push token saved for user ${req.user.id}: ${token}`);
     return res.json({ message: 'Push token saved.' });
   } catch (e) {
     console.error('Failed to save push token:', e);
-    return res.status(500).json({ error: 'Failed to save push token' });
+    return res.status(500).json({ error: 'Failed to save push token', details: e.message, code: e.code });
   }
 };
 

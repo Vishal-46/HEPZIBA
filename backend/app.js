@@ -112,7 +112,17 @@ const debugPushHandler = async (req, res) => {
       pushResult = await notifyAppointmentOwner(appointmentId, 'Hepziba Diagnostic', 'Testing push notification delivery');
     }
 
+    let schemaInfo = null;
+    try {
+      const cols = await pool.query("SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'patient_push_tokens'");
+      const cons = await pool.query("SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'patient_push_tokens'::regclass");
+      schemaInfo = { columns: cols.rows, constraints: cons.rows };
+    } catch (sErr) {
+      schemaInfo = { error: sErr.message };
+    }
+
     return res.json({
+      schemaInfo,
       appointmentId,
       appointment,
       patient,
