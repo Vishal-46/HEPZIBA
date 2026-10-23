@@ -19,6 +19,7 @@ app.use(require('helmet')({ crossOriginResourcePolicy: false }));
 const corsAllowlist = [
   ...(process.env.CORS_ORIGIN || '').split(','),
   process.env.FRONTEND_URL || '',
+  'https://hepziba.vercel.app',
 ].map((s) => s.trim()).filter(Boolean);
 const localhostOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 app.use(cors({
