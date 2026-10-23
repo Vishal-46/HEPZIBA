@@ -153,6 +153,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
     status: string;
     token?: string | null;
     checked: boolean;
+    errorMessage?: string;
   }>({ granted: true, status: 'checking', checked: false });
   const [testingPush, setTestingPush] = useState(false);
 
@@ -297,10 +298,11 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         const regRes = await mod.registerPushToken(token);
         if (!cancelled && regRes) {
           setPushStatus({
-            granted: regRes.permissionStatus === 'granted',
+            granted: regRes.success,
             status: regRes.permissionStatus,
             token: regRes.token,
             checked: true,
+            errorMessage: regRes.errorMessage,
           });
         }
         notifySub = await mod.addNotificationReceivedListener((notification) => {
@@ -1186,10 +1188,10 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                     color={pushStatus.granted ? '#16a34a' : '#ea580c'}
                   />
                   <Text style={[s.notifStatusText, { color: pushStatus.granted ? '#16a34a' : '#ea580c' }]}>
-                    {pushStatus.granted ? 'Push notifications active' : 'Notifications blocked'}
+                    {pushStatus.granted ? 'Push notifications active' : 'Notifications disabled / not active'}
                   </Text>
                 </View>
-                {!pushStatus.granted && Platform.OS !== 'web' && (
+                {Platform.OS !== 'web' && (
                   <Button
                     mode="text"
                     compact
@@ -1200,36 +1202,81 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                 )}
               </View>
 
+              {pushStatus.errorMessage && (
+                <Text style={{ color: '#b45309', fontSize: 12, marginBottom: 8, fontFamily: FONT.medium }}>
+                  Status: {pushStatus.errorMessage}
+                </Text>
+              )}
+
+              {pushStatus.token ? (
+                <Text style={{ color: COLOR.accent, fontSize: 11, marginBottom: 8 }} numberOfLines={1}>
+                  Device token: {pushStatus.token.slice(0, 28)}...
+                </Text>
+              ) : null}
+
               <Text style={s.notifHelpText}>
                 Receive alerts when your appointment is accepted, updated, or when prescriptions and bills are ready.
               </Text>
 
-              <Button
-                mode="outlined"
-                loading={testingPush}
-                disabled={testingPush}
-                icon="bell-outline"
-                onPress={async () => {
-                  setTestingPush(true);
-                  try {
-                    const mod = await import('../utils/pushRegistration');
-                    await mod.sendLocalTestNotification();
-                    const srv = await mod.testServerPush(token);
-                    if (srv.success) {
-                      setInfoText('Test push sent! Check your notification bar.');
-                    } else {
-                      setErrorText(`Push test note: ${srv.message}`);
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <Button
+                  mode="outlined"
+                  loading={testingPush}
+                  disabled={testingPush}
+                  icon="refresh"
+                  onPress={async () => {
+                    setTestingPush(true);
+                    try {
+                      const mod = await import('../utils/pushRegistration');
+                      const r = await mod.registerPushToken(token);
+                      setPushStatus({
+                        granted: r.success,
+                        status: r.permissionStatus,
+                        token: r.token,
+                        checked: true,
+                        errorMessage: r.errorMessage,
+                      });
+                      if (r.success) setInfoText('Push notifications registered successfully!');
+                      else setErrorText(r.errorMessage || 'Registration failed');
+                    } catch (e: any) {
+                      setErrorText(e?.message || 'Error registering');
+                    } finally {
+                      setTestingPush(false);
                     }
-                  } catch (e: any) {
-                    setErrorText(`Push test error: ${e?.message}`);
-                  } finally {
-                    setTestingPush(false);
-                  }
-                }}
-                style={s.testPushBtn}
-              >
-                Send Test Notification
-              </Button>
+                  }}
+                  style={[s.testPushBtn, { flex: 1 }]}
+                >
+                  Register
+                </Button>
+                <Button
+                  mode="contained"
+                  loading={testingPush}
+                  disabled={testingPush}
+                  icon="bell-outline"
+                  onPress={async () => {
+                    setTestingPush(true);
+                    try {
+                      const mod = await import('../utils/pushRegistration');
+                      await mod.sendLocalTestNotification();
+                      const srv = await mod.testServerPush(token);
+                      if (srv.success) {
+                        setInfoText('Test push sent! Check your notification bar.');
+                      } else {
+                        setErrorText(`Push test note: ${srv.message}`);
+                      }
+                    } catch (e: any) {
+                      setErrorText(`Push test error: ${e?.message}`);
+                    } finally {
+                      setTestingPush(false);
+                    }
+                  }}
+                  style={[s.primaryBtn, { flex: 1 }]}
+                  contentStyle={s.btnContent}
+                  labelStyle={s.primaryBtnText}
+                >
+                  Test Push
+                </Button>
+              </View>
             </Card.Content>
           </Card>
         </>

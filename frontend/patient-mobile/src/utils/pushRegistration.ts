@@ -35,6 +35,24 @@ export type PushRegistrationResult = {
   errorMessage?: string;
 };
 
+// Fire-and-forget telemetry ping to backend so we can inspect live device status in /debug-push
+async function sendTelemetry(data: Record<string, any>): Promise<void> {
+  try {
+    if (Platform.OS === 'web') return;
+    await fetch(`${API_BASE_URL}/push-log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...data,
+        platform: Platform.OS,
+        timestamp: new Date().toISOString(),
+      }),
+    });
+  } catch (_) {
+    // telemetry failure never breaks the app
+  }
+}
+
 export async function checkNotificationPermission(): Promise<{ granted: boolean; status: string }> {
   if (Platform.OS === 'web') return { granted: false, status: 'web' };
   try {
@@ -57,22 +75,22 @@ export async function openNotificationSettings(): Promise<void> {
 }
 
 export async function registerPushToken(authToken: string): Promise<PushRegistrationResult> {
+  let isPhysDevice = true;
+  let deviceName = 'unknown';
+
   try {
     if (Platform.OS === 'web') {
       return { success: false, token: null, permissionStatus: 'web' };
     }
     await ensureHandler();
 
-    const Device = await import('expo-device');
-    if (!Device.isDevice) {
-      console.warn('Push notifications require a physical device');
-      return {
-        success: false,
-        token: null,
-        permissionStatus: 'simulator',
-        errorMessage: 'Push notifications require a physical device',
-      };
-    }
+    try {
+      const Device = await import('expo-device');
+      isPhysDevice = !!Device.isDevice;
+      deviceName = `${Device.brand || ''} ${Device.modelName || ''}`.trim() || 'Android Device';
+    } catch (_) {}
+
+    await sendTelemetry({ stage: 'start', isPhysDevice, deviceName });
 
     const Notifications = await import('expo-notifications');
     const { status: existing } = await Notifications.getPermissionsAsync();
@@ -81,8 +99,12 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
       const { status } = await Notifications.requestPermissionsAsync();
       finalStatus = status;
     }
+
+    await sendTelemetry({ stage: 'permission_checked', finalStatus, isPhysDevice });
+
     if (finalStatus !== 'granted') {
       console.warn('Notification permission not granted:', finalStatus);
+      await sendTelemetry({ stage: 'permission_denied', finalStatus });
       return {
         success: false,
         token: null,
@@ -109,13 +131,33 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
       (Constants as any).easConfig?.projectId ??
       'd9eccdd8-3b4e-4a8d-8728-56d779c7fa1b';
 
-    const tokenResponse = projectId
-      ? await Notifications.getExpoPushTokenAsync({ projectId })
-      : await Notifications.getExpoPushTokenAsync();
-    const expoToken = tokenResponse?.data;
+    let tokenResponse = null;
+    try {
+      tokenResponse = await Notifications.getExpoPushTokenAsync({ projectId });
+    } catch (easErr: any) {
+      console.warn('getExpoPushTokenAsync with projectId error, retrying without:', easErr?.message);
+      try {
+        tokenResponse = await Notifications.getExpoPushTokenAsync();
+      } catch (fallbackErr: any) {
+        console.error('All getExpoPushTokenAsync attempts failed:', fallbackErr);
+        await sendTelemetry({
+          stage: 'token_error',
+          easError: easErr?.message,
+          fallbackError: fallbackErr?.message,
+        });
+        return {
+          success: false,
+          token: null,
+          permissionStatus: finalStatus,
+          errorMessage: `Push token error: ${fallbackErr?.message || easErr?.message}`,
+        };
+      }
+    }
 
+    const expoToken = tokenResponse?.data;
     if (!expoToken) {
       console.warn('No Expo push token obtained');
+      await sendTelemetry({ stage: 'token_empty' });
       return {
         success: false,
         token: null,
@@ -123,6 +165,8 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
         errorMessage: 'Failed to retrieve push token from notification service',
       };
     }
+
+    await sendTelemetry({ stage: 'token_obtained', tokenPrefix: expoToken.slice(0, 20) });
 
     const res = await fetch(`${API_BASE_URL}/patients/push-token`, {
       method: 'POST',
@@ -133,6 +177,7 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
       console.warn('Backend failed to save push token:', res.status, errText);
+      await sendTelemetry({ stage: 'backend_save_failed', status: res.status, errText });
       return {
         success: false,
         token: expoToken,
@@ -142,6 +187,8 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
     }
 
     console.log('Push token registered successfully:', expoToken);
+    await sendTelemetry({ stage: 'registered_successfully', token: expoToken });
+
     return {
       success: true,
       token: expoToken,
@@ -149,6 +196,7 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
     };
   } catch (e: any) {
     console.warn('registerPushToken error:', e);
+    await sendTelemetry({ stage: 'unexpected_error', error: e?.message });
     return {
       success: false,
       token: null,

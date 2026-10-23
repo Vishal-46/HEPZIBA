@@ -56,6 +56,19 @@ app.use('/inventory', require('./inventory/inventoryRoutes'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+const pushLogs = [];
+app.post('/push-log', async (req, res) => {
+  const logEntry = {
+    receivedAt: new Date().toISOString(),
+    body: req.body,
+    ip: req.ip,
+  };
+  pushLogs.unshift(logEntry);
+  if (pushLogs.length > 50) pushLogs.pop();
+  console.log('Device push log received:', JSON.stringify(req.body));
+  return res.json({ ok: true });
+});
+
 const debugPushHandler = async (req, res) => {
   const pool = require('./db');
   const { tokensForUser, notifyAppointmentOwner } = require('./utils/push');
@@ -109,6 +122,7 @@ const debugPushHandler = async (req, res) => {
       recentAppointments: recentAppointmentsRes.rows,
       recentUsers: recentUsersRes.rows,
       pushResult,
+      recentDeviceLogs: pushLogs,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message, stack: e.stack });
