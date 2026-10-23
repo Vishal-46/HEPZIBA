@@ -1,9 +1,5 @@
-import { Platform } from 'react-native';
+import { Platform, Linking } from 'react-native';
 import { API_BASE_URL } from '../config/api';
-
-// NOTE: expo-device / expo-notifications are imported lazily inside the
-// functions below so the web bundle (which has no ExpoDevice native module)
-// never evaluates them at load time.
 
 // Foreground presentation: show a banner and play sound even while the app is open.
 let handlerSet = false;
@@ -23,7 +19,6 @@ export async function ensureHandler() {
     });
     handlerSet = true;
   } catch (e) {
-    // Notifications unavailable — in-app polling still applies.
     console.warn('ensureHandler could not initialize:', e);
   }
 }
@@ -33,15 +28,50 @@ if (Platform.OS !== 'web') {
   void ensureHandler();
 }
 
-export async function registerPushToken(authToken: string): Promise<string | null> {
+export type PushRegistrationResult = {
+  success: boolean;
+  token: string | null;
+  permissionStatus: string;
+  errorMessage?: string;
+};
+
+export async function checkNotificationPermission(): Promise<{ granted: boolean; status: string }> {
+  if (Platform.OS === 'web') return { granted: false, status: 'web' };
   try {
-    if (Platform.OS === 'web') return null;
+    const Notifications = await import('expo-notifications');
+    const { status } = await Notifications.getPermissionsAsync();
+    return { granted: status === 'granted', status };
+  } catch {
+    return { granted: false, status: 'unavailable' };
+  }
+}
+
+export async function openNotificationSettings(): Promise<void> {
+  try {
+    if (Platform.OS === 'android' || Platform.OS === 'ios') {
+      await Linking.openSettings();
+    }
+  } catch (e) {
+    console.warn('Could not open settings:', e);
+  }
+}
+
+export async function registerPushToken(authToken: string): Promise<PushRegistrationResult> {
+  try {
+    if (Platform.OS === 'web') {
+      return { success: false, token: null, permissionStatus: 'web' };
+    }
     await ensureHandler();
 
     const Device = await import('expo-device');
     if (!Device.isDevice) {
       console.warn('Push notifications require a physical device');
-      return null;
+      return {
+        success: false,
+        token: null,
+        permissionStatus: 'simulator',
+        errorMessage: 'Push notifications require a physical device',
+      };
     }
 
     const Notifications = await import('expo-notifications');
@@ -53,7 +83,12 @@ export async function registerPushToken(authToken: string): Promise<string | nul
     }
     if (finalStatus !== 'granted') {
       console.warn('Notification permission not granted:', finalStatus);
-      return null;
+      return {
+        success: false,
+        token: null,
+        permissionStatus: finalStatus,
+        errorMessage: 'Notification permission was denied. Please allow notifications in device settings.',
+      };
     }
 
     if (Platform.OS === 'android') {
@@ -81,7 +116,12 @@ export async function registerPushToken(authToken: string): Promise<string | nul
 
     if (!expoToken) {
       console.warn('No Expo push token obtained');
-      return null;
+      return {
+        success: false,
+        token: null,
+        permissionStatus: finalStatus,
+        errorMessage: 'Failed to retrieve push token from notification service',
+      };
     }
 
     const res = await fetch(`${API_BASE_URL}/patients/push-token`, {
@@ -93,14 +133,28 @@ export async function registerPushToken(authToken: string): Promise<string | nul
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
       console.warn('Backend failed to save push token:', res.status, errText);
-    } else {
-      console.log('Push token registered successfully:', expoToken);
+      return {
+        success: false,
+        token: expoToken,
+        permissionStatus: finalStatus,
+        errorMessage: `Server failed to save push token (status: ${res.status})`,
+      };
     }
 
-    return expoToken;
-  } catch (e) {
+    console.log('Push token registered successfully:', expoToken);
+    return {
+      success: true,
+      token: expoToken,
+      permissionStatus: finalStatus,
+    };
+  } catch (e: any) {
     console.warn('registerPushToken error:', e);
-    return null;
+    return {
+      success: false,
+      token: null,
+      permissionStatus: 'error',
+      errorMessage: e?.message || 'Unknown error occurred while registering push token',
+    };
   }
 }
 
@@ -135,11 +189,11 @@ export async function addNotificationResponseReceivedListener(
 export async function sendLocalTestNotification(
   title = 'Hepziba Clinic',
   body = 'Test Notification: Visit notifications are configured and working properly!',
-): Promise<void> {
+): Promise<boolean> {
   try {
     if (Platform.OS === 'web') {
       console.log('Local notifications are not supported on web.');
-      return;
+      return false;
     }
     await ensureHandler();
     const Notifications = await import('expo-notifications');
@@ -153,7 +207,42 @@ export async function sendLocalTestNotification(
       trigger: { channelId: 'default' },
     });
     console.log('Local test notification triggered.');
+    return true;
   } catch (e) {
     console.warn('sendLocalTestNotification error:', e);
+    return false;
+  }
+}
+
+/**
+ * Triggers a backend-initiated push notification through the server -> Expo -> FCM pipeline.
+ */
+export async function testServerPush(
+  authToken: string,
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/patients/test-push`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+      },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        success: false,
+        message: data.error || `Server returned error (${res.status})`,
+      };
+    }
+    return {
+      success: true,
+      message: data.message || 'Test notification sent from server!',
+    };
+  } catch (e: any) {
+    return {
+      success: false,
+      message: e?.message || 'Network error reaching Hepziba server',
+    };
   }
 }

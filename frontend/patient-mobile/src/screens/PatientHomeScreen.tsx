@@ -148,6 +148,13 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
   const [errorText, setErrorText] = useState('');
   const [infoText, setInfoText] = useState('');
   const [isOffline, setIsOffline] = useState(false);
+  const [pushStatus, setPushStatus] = useState<{
+    granted: boolean;
+    status: string;
+    token?: string | null;
+    checked: boolean;
+  }>({ granted: true, status: 'checking', checked: false });
+  const [testingPush, setTestingPush] = useState(false);
 
   const [showBookModal, setShowBookModal] = useState(false);
   const [selectedDoctorId, setSelectedDoctorId] = useState<number | null>(null);
@@ -287,7 +294,15 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       try {
         const mod = await import('../utils/pushRegistration');
         if (cancelled) return;
-        void mod.registerPushToken(token);
+        const regRes = await mod.registerPushToken(token);
+        if (!cancelled && regRes) {
+          setPushStatus({
+            granted: regRes.permissionStatus === 'granted',
+            status: regRes.permissionStatus,
+            token: regRes.token,
+            checked: true,
+          });
+        }
         notifySub = await mod.addNotificationReceivedListener((notification) => {
           const content = notification?.request?.content;
           const title = content?.title;
@@ -681,6 +696,22 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         </View>
       )}
 
+      {!pushStatus.granted && pushStatus.checked && Platform.OS !== 'web' && (
+        <Pressable
+          onPress={() => {
+            void import('../utils/pushRegistration').then((m) => m.openNotificationSettings());
+          }}
+          style={s.notifWarningBanner}
+        >
+          <Ionicons name="notifications-off-outline" size={20} color="#b45309" />
+          <View style={s.notifWarningWrap}>
+            <Text style={s.notifWarningTitle}>Notifications are disabled</Text>
+            <Text style={s.notifWarningSub}>Tap to allow notifications in phone Settings to get visit alerts.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color="#b45309" />
+        </Pressable>
+      )}
+
       <ScrollView contentContainerStyle={s.scrollBody}>
         {loading && <ActivityIndicator color={COLOR.primary} style={{ marginBottom: SPACING.s }} />}
 
@@ -1028,7 +1059,8 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         )}
 
         {tab === 'profile' && (
-          <Card style={s.card}>
+          <>
+            <Card style={s.card}>
             <Card.Content>
               <Text style={s.cardTitle}>Patient Details</Text>
 
@@ -1142,7 +1174,66 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
               </Button>
             </Card.Content>
           </Card>
-        )}
+
+          <Card style={[s.card, { marginTop: SPACING.m }]}>
+            <Card.Content>
+              <Text style={s.cardTitle}>Notifications & Alerts</Text>
+              <View style={s.notifStatusRow}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                  <Ionicons
+                    name={pushStatus.granted ? 'checkmark-circle' : 'alert-circle'}
+                    size={22}
+                    color={pushStatus.granted ? '#16a34a' : '#ea580c'}
+                  />
+                  <Text style={[s.notifStatusText, { color: pushStatus.granted ? '#16a34a' : '#ea580c' }]}>
+                    {pushStatus.granted ? 'Push notifications active' : 'Notifications blocked'}
+                  </Text>
+                </View>
+                {!pushStatus.granted && Platform.OS !== 'web' && (
+                  <Button
+                    mode="text"
+                    compact
+                    onPress={() => void import('../utils/pushRegistration').then((m) => m.openNotificationSettings())}
+                  >
+                    Settings
+                  </Button>
+                )}
+              </View>
+
+              <Text style={s.notifHelpText}>
+                Receive alerts when your appointment is accepted, updated, or when prescriptions and bills are ready.
+              </Text>
+
+              <Button
+                mode="outlined"
+                loading={testingPush}
+                disabled={testingPush}
+                icon="bell-outline"
+                onPress={async () => {
+                  setTestingPush(true);
+                  try {
+                    const mod = await import('../utils/pushRegistration');
+                    await mod.sendLocalTestNotification();
+                    const srv = await mod.testServerPush(token);
+                    if (srv.success) {
+                      setInfoText('Test push sent! Check your notification bar.');
+                    } else {
+                      setErrorText(`Push test note: ${srv.message}`);
+                    }
+                  } catch (e: any) {
+                    setErrorText(`Push test error: ${e?.message}`);
+                  } finally {
+                    setTestingPush(false);
+                  }
+                }}
+                style={s.testPushBtn}
+              >
+                Send Test Notification
+              </Button>
+            </Card.Content>
+          </Card>
+        </>
+      )}
 
         {tab === 'clinic' && (
           <>
@@ -1629,4 +1720,22 @@ const s = StyleSheet.create({
     padding: SPACING.l,
   },
   modalCard: { backgroundColor: COLOR.surface, borderRadius: RADIUS.lg, padding: SPACING.l, ...SHADOW.card },
+  notifWarningBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: SPACING.l,
+    marginBottom: SPACING.s,
+    padding: SPACING.s,
+    backgroundColor: '#fef3c7',
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: '#fde68a',
+  },
+  notifWarningWrap: { flex: 1, marginHorizontal: SPACING.s },
+  notifWarningTitle: { color: '#92400e', fontFamily: FONT.bold, fontSize: 13 },
+  notifWarningSub: { color: '#b45309', fontFamily: FONT.regular, fontSize: 11, marginTop: 1 },
+  notifStatusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: SPACING.xs },
+  notifStatusText: { fontFamily: FONT.medium, fontSize: 13, marginLeft: SPACING.xs },
+  notifHelpText: { color: COLOR.accent, fontFamily: FONT.regular, fontSize: 12, marginBottom: SPACING.m },
+  testPushBtn: { borderColor: COLOR.primary, borderRadius: RADIUS.md },
 });
