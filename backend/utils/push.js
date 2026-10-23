@@ -1,6 +1,15 @@
 // Expo push notifications (best-effort: failures never break the API call).
 const pool = require('../db');
 
+function isExpoPushToken(token) {
+  if (typeof token !== 'string') return false;
+  return (
+    /^ExponentPushToken\[[^\]]+\]$/.test(token) ||
+    /^ExpoPushToken\[[^\]]+\]$/.test(token) ||
+    /^[a-z\d]{8}-[a-z\d]{4}-[a-z\d]{4}-[a-z\d]{4}-[a-z\d]{12}$/i.test(token)
+  );
+}
+
 async function tokensForUser(userId) {
   try {
     const r = await pool.query('SELECT token FROM patient_push_tokens WHERE user_id=$1', [userId]);
@@ -12,20 +21,49 @@ async function tokensForUser(userId) {
 }
 
 async function sendPush(tokens, title, body, data = {}) {
-  if (!tokens.length) {
-    console.log('push: no tokens to send to');
+  const tokenList = (Array.isArray(tokens) ? tokens : [tokens]).filter(isExpoPushToken);
+  if (!tokenList.length) {
+    console.log('push: no valid tokens to send to');
     return;
   }
-  const messages = tokens.map((to) => ({ to, sound: 'default', title, body, data }));
+  const messages = tokenList.map((to) => ({
+    to,
+    sound: 'default',
+    title,
+    body,
+    channelId: 'default',
+    priority: 'high',
+    data,
+  }));
   try {
     const res = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip, deflate',
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify(messages),
     });
     const text = await res.text();
-    if (!res.ok) console.error('push send failed:', res.status, text);
-    else console.log('push send ok:', text);
+    if (!res.ok) {
+      console.error('push send failed:', res.status, text);
+    } else {
+      console.log('push send ok:', text);
+      try {
+        const payload = JSON.parse(text);
+        if (payload && Array.isArray(payload.data)) {
+          payload.data.forEach((ticket, idx) => {
+            if (ticket.status === 'error') {
+              console.error(`push ticket error for token ${tokenList[idx]}:`, ticket.message, ticket.details);
+              if (ticket.details && ticket.details.error === 'DeviceNotRegistered') {
+                pool.query('DELETE FROM patient_push_tokens WHERE token=$1', [tokenList[idx]]).catch(() => {});
+              }
+            }
+          });
+        }
+      } catch (_) {}
+    }
   } catch (e) {
     console.error('push send error:', e.message);
   }
@@ -53,4 +91,4 @@ async function notifyAppointmentOwner(appointmentId, title, body) {
   }
 }
 
-module.exports = { tokensForUser, sendPush, notifyAppointmentOwner };
+module.exports = { tokensForUser, sendPush, notifyAppointmentOwner, isExpoPushToken };

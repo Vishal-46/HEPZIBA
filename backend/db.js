@@ -17,4 +17,16 @@ const pool = new Pool({
   ...(isLocalhost ? {} : { ssl: { rejectUnauthorized: false } }),
 });
 
+// Non-blocking self-healing schema check on startup (ensures notes column and push tokens table exist)
+pool.query(`
+  ALTER TABLE appointments ADD COLUMN IF NOT EXISTS notes TEXT;
+  CREATE TABLE IF NOT EXISTS patient_push_tokens (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    token TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`).catch((err) => {
+  console.warn('Initial schema ensure notice:', err.message);
+});
+
 module.exports = pool;

@@ -5,7 +5,11 @@ exports.savePushToken = async (req, res) => {
   const token = req.body && req.body.token !== undefined && req.body.token !== null
     ? String(req.body.token).trim()
     : '';
-  if (!token || !/^ExponentPushToken\[[^\]]+\]$/.test(token)) {
+  const isExpoToken =
+    /^ExponentPushToken\[[^\]]+\]$/.test(token) ||
+    /^ExpoPushToken\[[^\]]+\]$/.test(token) ||
+    /^[a-z\d]{8}-[a-z\d]{4}-[a-z\d]{4}-[a-z\d]{4}-[a-z\d]{12}$/i.test(token);
+  if (!token || !isExpoToken) {
     return res.status(400).json({ error: 'Invalid push token' });
   }
   try {
@@ -14,9 +18,10 @@ exports.savePushToken = async (req, res) => {
        ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, updated_at = NOW()`,
       [req.user.id, token]
     );
+    console.log(`Push token saved for user ${req.user.id}: ${token}`);
     return res.json({ message: 'Push token saved.' });
   } catch (e) {
-    console.error(e);
+    console.error('Failed to save push token:', e);
     return res.status(500).json({ error: 'Failed to save push token' });
   }
 };

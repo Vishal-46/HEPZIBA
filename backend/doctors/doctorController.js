@@ -80,8 +80,47 @@ exports.updateAppointment = async (req, res) => {
       }
     }
     const cleanNotes = notes !== undefined && notes !== null ? String(notes).trim() || null : null;
-    // Preserve existing values when a field is omitted (COALESCE keeps old).
-    await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [nextStatus ? toDb(nextStatus) : null, cleanNotes, req.params.id]);
+
+    const statusesToTry = [];
+    if (nextStatus === 'done') statusesToTry.push('done', 'completed');
+    else if (nextStatus === 'completed') statusesToTry.push('completed', 'done');
+    else if (nextStatus) statusesToTry.push(nextStatus);
+    else statusesToTry.push(null);
+
+    let updated = false;
+    let lastError = null;
+
+    for (const targetStatus of statusesToTry) {
+      try {
+        await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [targetStatus, cleanNotes, req.params.id]);
+        updated = true;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (err.code === '42703' && String(err.message).includes('notes')) {
+          await pool.query('ALTER TABLE appointments ADD COLUMN IF NOT EXISTS notes TEXT').catch(() => {});
+          try {
+            await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [targetStatus, cleanNotes, req.params.id]);
+            updated = true;
+            break;
+          } catch (retryErr) {
+            try {
+              await pool.query('UPDATE appointments SET status=COALESCE($1,status) WHERE id=$2', [targetStatus, req.params.id]);
+              updated = true;
+              break;
+            } catch (fallbackErr) {
+              lastError = fallbackErr;
+            }
+          }
+        }
+      }
+    }
+
+    if (!updated) {
+      console.error('Doctor update appointment DB error:', lastError);
+      return res.status(500).json({ error: 'Failed to update appointment', details: lastError ? lastError.message : undefined });
+    }
+
     try {
       const { notifyAppointmentOwner } = require('../utils/push');
       const msg = cleanNotes || '';
@@ -96,6 +135,7 @@ exports.updateAppointment = async (req, res) => {
     } catch (_) { /* ignore */ }
     res.json({ message: 'Appointment updated' });
   } catch (e) {
-    console.error(e); res.status(500).json({ error: 'Failed to update appointment' });
+    console.error('Unexpected error in doctor updateAppointmentStatus:', e);
+    res.status(500).json({ error: 'Failed to update appointment', details: e.message });
   }
 };

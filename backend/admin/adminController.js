@@ -105,7 +105,6 @@ exports.listAppointments = async (req, res) => {
 // PATCH /admin/appointments/:id - Admin may set any whitelisted status (bypass ownership)
 exports.updateAppointmentStatus = async (req, res) => {
   const ADMIN_STATUSES = ['pending', 'confirmed', 'done', 'completed', 'cancelled'];
-  const toDb = (s) => (s === 'done' ? 'completed' : s);
   try {
     const appointmentId = Number(req.params.id);
     if (!Number.isInteger(appointmentId)) return res.status(400).json({ error: 'Invalid appointment id' });
@@ -121,12 +120,61 @@ exports.updateAppointmentStatus = async (req, res) => {
     if (nextStatus === null && notes === undefined) {
       return res.status(400).json({ error: 'No fields to update' });
     }
-    const q = await pool.query(
-      'UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3 RETURNING *',
-      [nextStatus ? toDb(nextStatus) : null, cleanNotes, appointmentId]
-    );
+
+    // Try updating status. If the DB constraint requires 'done' vs 'completed', fallback smoothly.
+    const statusesToTry = [];
+    if (nextStatus === 'done') statusesToTry.push('done', 'completed');
+    else if (nextStatus === 'completed') statusesToTry.push('completed', 'done');
+    else if (nextStatus) statusesToTry.push(nextStatus);
+    else statusesToTry.push(null);
+
+    let q = null;
+    let lastError = null;
+
+    for (const targetStatus of statusesToTry) {
+      try {
+        q = await pool.query(
+          'UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3 RETURNING *',
+          [targetStatus, cleanNotes, appointmentId]
+        );
+        break;
+      } catch (err) {
+        lastError = err;
+        // If column 'notes' does not exist in appointments table:
+        if (err.code === '42703' && String(err.message).includes('notes')) {
+          await pool.query('ALTER TABLE appointments ADD COLUMN IF NOT EXISTS notes TEXT').catch(() => {});
+          try {
+            q = await pool.query(
+              'UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3 RETURNING *',
+              [targetStatus, cleanNotes, appointmentId]
+            );
+            break;
+          } catch (retryErr) {
+            try {
+              q = await pool.query(
+                'UPDATE appointments SET status=COALESCE($1,status) WHERE id=$2 RETURNING *',
+                [targetStatus, appointmentId]
+              );
+              break;
+            } catch (fallbackErr) {
+              lastError = fallbackErr;
+            }
+          }
+        }
+      }
+    }
+
+    if (!q) {
+      console.error('Update appointment DB error:', lastError);
+      return res.status(500).json({
+        error: 'Failed to update appointment',
+        details: lastError ? lastError.message : undefined,
+      });
+    }
+
     if (!q.rows.length) return res.status(404).json({ error: 'Appointment not found' });
     const finalStatus = q.rows[0].status === 'completed' ? 'done' : q.rows[0].status;
+
     // Best-effort patient notification (never fails the update).
     try {
       const { notifyAppointmentOwner } = require('../utils/push');
@@ -139,9 +187,11 @@ exports.updateAppointmentStatus = async (req, res) => {
         void notifyAppointmentOwner(appointmentId, 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
       }
     } catch (_) { /* ignore */ }
+
     res.json({ message: 'Appointment updated', appointment: q.rows[0] });
   } catch (e) {
-    console.error(e); res.status(500).json({ error: 'Failed to update appointment' });
+    console.error('Unexpected error in updateAppointmentStatus:', e);
+    res.status(500).json({ error: 'Failed to update appointment', details: e.message });
   }
 };
 
