@@ -12,13 +12,13 @@ import { NavigationContainer } from '@react-navigation/native';
 import AuthScreen from './src/screens/AuthScreen';
 import PatientHomeScreen from './src/screens/PatientHomeScreen';
 import { COLOR } from './theme';
-import type { Session } from './src/utils/sessionTypes';
+import type { Session, User } from './src/utils/sessionTypes';
 import {
   clearSession,
   loadSession,
   saveSession,
 } from './src/utils/tokenStore';
-import { configureApiClient } from './src/utils/apiClient';
+import { configureApiClient, apiGet } from './src/utils/apiClient';
 import { API_BASE_URL } from './src/config/api';
 
 const paperTheme = {
@@ -128,7 +128,37 @@ export default function App() {
     (async () => {
       try {
         const stored = await loadSession();
-        if (!cancelled && stored?.token) setSession(stored);
+        if (!cancelled && stored?.token) {
+          sessionRef.current = stored;
+          setSession(stored);
+          // Token present but cached user unusable (e.g. JSON corrupt / legacy
+          // placeholder) → hydrate the real patient via /patients/me.
+          if (stored.user.id === 0) {
+            try {
+              const me = await apiGet<any>('/patients/me');
+              const meUser: User = {
+                id: Number(me?.id ?? 0),
+                name: String(me?.name ?? stored.user.name ?? ''),
+                email: String(me?.email ?? stored.user.email ?? ''),
+                role: (me?.role as User['role']) ?? stored.user.role,
+              };
+              const next: Session = {
+                token: stored.token,
+                ...(stored.refreshToken ? { refreshToken: stored.refreshToken } : {}),
+                user: meUser,
+              };
+              sessionRef.current = next;
+              setSession(next);
+              try {
+                await saveSession(next);
+              } catch {
+                // In-memory session still works for this launch.
+              }
+            } catch {
+              // Keep the placeholder; data calls will surface the error.
+            }
+          }
+        }
       } catch {
         if (!cancelled) setRestoreError('Could not restore your session.');
       } finally {

@@ -2,8 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { SafeAreaView, ScrollView, StyleSheet, View, ActivityIndicator } from 'react-native';
 import { Card, Text, Button } from 'react-native-paper';
 import { COLOR, SPACING, FONT, RADIUS, SHADOW } from '../../theme';
-import { API_BASE_URL } from '../config/api';
-import { loadSession } from '../utils/tokenStore';
+import { apiGet } from '../utils/apiClient';
 
 type Line = { medicine_name: string; quantity: number; mrp?: number | string; total?: number | string };
 
@@ -17,14 +16,9 @@ export default function InvoiceDetailScreen({ route, navigation }: any) {
     let alive = true;
     (async () => {
       try {
-        const session = await loadSession();
-        const res = await fetch(`${API_BASE_URL}/billing/invoices/${invoice.id}`, {
-          headers: session?.token ? { Authorization: `Bearer ${session.token}` } : {},
-        });
-        if (!res.ok) return;
-        const data = await res.json();
+        const data = await apiGet<any>(`/billing/invoices/${invoice.id}`);
         if (!alive) return;
-        if (Array.isArray(data.items)) setLines(data.items);
+        if (Array.isArray(data?.items)) setLines(data.items);
         if (data.doctor_fee !== undefined) setFee(String(data.doctor_fee));
         if (data.status) setStatus(data.status);
       } catch {

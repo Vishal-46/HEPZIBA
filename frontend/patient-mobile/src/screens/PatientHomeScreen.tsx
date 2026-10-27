@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   TouchableOpacity,
   Pressable,
@@ -25,13 +25,14 @@ import {
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import { File, UploadType } from 'expo-file-system';
-import { API_BASE_URL, CLOUDINARY_UPLOAD_PRESET, CLOUDINARY_UPLOAD_URL } from '../config/api';
+import { CLOUDINARY_UPLOAD_PRESET, CLOUDINARY_UPLOAD_URL } from '../config/api';
 import FormField from '../components/FormField';
 import { COLOR, FONT, RADIUS, SHADOW, SPACING } from '../../theme';
 import { Ionicons } from '@expo/vector-icons';
 import { createStackNavigator } from '@react-navigation/stack';
 import PrescriptionDetailScreen from './PrescriptionDetailScreen';
 import InvoiceDetailScreen from './InvoiceDetailScreen';
+import { apiGet as apiGetShared, apiPost, apiPut, ApiError } from '../utils/apiClient';
 import type { User } from '../utils/sessionTypes';
 
 type Appointment = {
@@ -81,29 +82,29 @@ const PRIORITY_OPTIONS = ['normal', 'urgent'];
 const HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 } as const;
 const CLINIC_DETAILS = {
   name: 'Hepziba Chest Clinic',
-  doctor: 'Dr. T. Joseph Pratheeban, DCH, MD (Respiratory Medicine)',
+  doctor: 'Dr. T. Joseph Pratheeban, DCH, MD',
   specialty: 'Pulmonologist & Bronchoscopist',
   address: 'Opposite to WCC Entrance, White House Street, Nagercoil',
   mobile: '9500907968',
 };
 
 const CLINIC_HIGHLIGHTS = [
-  'Specialist chest and respiratory care',
-  'Easy appointment requests with quick confirmation',
-  'Your records and prescriptions in one place',
+  'Specialist chest & respiratory care',
+  'Easy booking with quick confirmation',
+  'Records, prescriptions & bills in one place',
 ];
 
 const HOW_TO_USE = [
-  'Book Appointment: pick a doctor and time, add your reason and symptoms.',
-  'Consult Doctor: visit the clinic at your scheduled time for consultation.',
-  'View Records: check appointments, prescriptions, and bills anytime.',
-  'Update Profile: keep your contact and health details updated.',
+  'Book: choose doctor, date & reason.',
+  'Consult: visit at your scheduled time.',
+  'View: records, prescriptions & bills anytime.',
+  'Update: keep your health details current.',
 ];
 
 const BEFORE_VISIT = [
-  'Bring any previous reports or test results.',
-  'Keep your phone number active for updates.',
-  'Arrive a little early for smooth check-in.',
+  'Bring previous reports or test results.',
+  'Keep your phone reachable for updates.',
+  'Arrive a little early for check-in.',
 ];
 
 const Stack = createStackNavigator();
@@ -190,31 +191,21 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
   });
   const [photoUploading, setPhotoUploading] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
-  const logoutRef = useRef(onLogout);
-  logoutRef.current = onLogout;
-
-  const authHeaders = useMemo(
-    () => ({ Authorization: `Bearer ${token}` }),
-    [token],
-  );
-
   const apiGet = useCallback(
-    async (url: string) => {
-      let response: Response;
+    async (path: string) => {
+      // Route through the shared API client so silent refresh + single retry +
+      // global logout apply on 401. Network-level failures surface as
+      // 'NETWORK_OFFLINE' so the offline banner logic keeps working.
       try {
-        response = await fetch(url, { headers: authHeaders });
-      } catch {
+        return await apiGetShared<any>(path);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          throw new Error(apiErrorMessage(error.payload, 'Request failed'));
+        }
         throw new Error('NETWORK_OFFLINE');
       }
-      if (response.status === 401) {
-        logoutRef.current();
-        throw new Error('Session expired. Please sign in again.');
-      }
-      const payload = await safeJson(response);
-      if (!response.ok) throw new Error(apiErrorMessage(payload, 'Request failed'));
-      return payload;
     },
-    [authHeaders],
+    [],
   );
 
   const loadAll = useCallback(async () => {
@@ -224,11 +215,11 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
     setIsOffline(false);
     try {
       const [apps, docs, me, rx, bills] = await Promise.allSettled([
-        apiGet(`${API_BASE_URL}/appointments/my`),
-        apiGet(`${API_BASE_URL}/appointments/catalog/doctors`),
-        apiGet(`${API_BASE_URL}/patients/me`),
-        apiGet(`${API_BASE_URL}/prescriptions/my`),
-        apiGet(`${API_BASE_URL}/billing/my`),
+        apiGet('/appointments/my'),
+        apiGet('/appointments/catalog/doctors'),
+        apiGet('/patients/me'),
+        apiGet('/prescriptions/my'),
+        apiGet('/billing/my'),
       ]);
 
       const offlineHits = [apps, docs, me, rx, bills].filter(
@@ -312,12 +303,12 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
           const body = content?.body;
           const text = body ? (title ? `${title}: ${body}` : body) : 'Update from clinic — refreshing your visits…';
           setInfoText(text);
-          void apiGet(`${API_BASE_URL}/appointments/my`)
+          void apiGet('/appointments/my')
             .then((apps) => {
               if (Array.isArray(apps)) setAppointments(apps);
             })
             .catch(() => {});
-          void apiGet(`${API_BASE_URL}/billing/my`)
+          void apiGet('/billing/my')
             .then((bills) => {
               if (Array.isArray(bills)) setInvoices(bills);
             })
@@ -367,9 +358,9 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
   useEffect(() => {
     const id = setInterval(async () => {
       try {
-        const apps = await apiGet(`${API_BASE_URL}/appointments/my`);
+        const apps = await apiGet('/appointments/my');
         if (Array.isArray(apps)) setAppointments(apps);
-        const bills = await apiGet(`${API_BASE_URL}/billing/my`);
+        const bills = await apiGet('/billing/my');
         if (Array.isArray(bills)) setInvoices(bills);
       } catch {
         // Silent: next tick retries; errors surface on full load.
@@ -526,30 +517,12 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       // only when already known.
       const doctorId = selectedDoctorId ?? doctors[0]?.doctor_id ?? null;
 
-      let response: Response;
-      try {
-        response = await fetch(`${API_BASE_URL}/appointments/`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            ...(doctorId ? { doctor_id: doctorId } : {}),
-            scheduled_at: appointmentDate.toISOString(),
-            reason,
-            notes,
-          }),
-        });
-      } catch {
-        throw new Error('Cannot reach the server. Check your connection and try again.');
-      }
-      if (response.status === 401) {
-        onLogout();
-        throw new Error('Session expired. Please sign in again.');
-      }
-      const payload = await safeJson(response);
-      if (!response.ok) throw new Error(apiErrorMessage(payload, 'Booking failed'));
+      await apiPost('/appointments/', {
+        ...(doctorId ? { doctor_id: doctorId } : {}),
+        scheduled_at: appointmentDate.toISOString(),
+        reason,
+        notes,
+      });
 
       setInfoText(
         'Request submitted — the clinic will confirm shortly. Watch Home for your visit status.',
@@ -558,7 +531,13 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       setTab('home');
       await loadAll();
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'Booking failed');
+      setErrorText(
+        error instanceof Error
+          ? error.message === 'NETWORK_OFFLINE'
+            ? 'Cannot reach the server. Check your connection and try again.'
+            : error.message
+          : 'Booking failed',
+      );
     } finally {
       setBookingInFlight(false);
     }
@@ -643,39 +622,30 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         }
       }
 
-      let response: Response;
-      try {
-        response = await fetch(`${API_BASE_URL}/patients/me`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            name: profileDraft.name.trim() || undefined,
-            email: profileDraft.email.trim() || undefined,
-            age: profileDraft.age.trim() ? Number(profileDraft.age) : undefined,
-            sex: profileDraft.sex.trim() || undefined,
-            address: profileDraft.address.trim() || undefined,
-            mobile: mobile || undefined,
-            photo_url: profileDraft.photo_url.trim() || undefined,
-            aadhar_number: aadhaar || undefined,
-            height_cm: profileDraft.height_cm.trim() ? Number(profileDraft.height_cm) : undefined,
-            weight_kg: profileDraft.weight_kg.trim() ? Number(profileDraft.weight_kg) : undefined,
-            bp: profileDraft.bp.trim() || undefined,
-            spo2: profileDraft.spo2.trim() ? Number(profileDraft.spo2) : undefined,
-          }),
-        });
-      } catch {
-        throw new Error('Cannot reach the server. Check your connection and try again.');
-      }
-      if (response.status === 401) {
-        onLogout();
-        throw new Error('Session expired. Please sign in again.');
-      }
-      const payload = await safeJson(response);
-      if (!response.ok) throw new Error(apiErrorMessage(payload, 'Profile update failed'));
+      await apiPut('/patients/me', {
+        name: profileDraft.name.trim() || undefined,
+        email: profileDraft.email.trim() || undefined,
+        age: profileDraft.age.trim() ? Number(profileDraft.age) : undefined,
+        sex: profileDraft.sex.trim() || undefined,
+        address: profileDraft.address.trim() || undefined,
+        mobile: mobile || undefined,
+        photo_url: profileDraft.photo_url.trim() || undefined,
+        aadhar_number: aadhaar || undefined,
+        height_cm: profileDraft.height_cm.trim() ? Number(profileDraft.height_cm) : undefined,
+        weight_kg: profileDraft.weight_kg.trim() ? Number(profileDraft.weight_kg) : undefined,
+        bp: profileDraft.bp.trim() || undefined,
+        spo2: profileDraft.spo2.trim() ? Number(profileDraft.spo2) : undefined,
+      });
       setInfoText('Profile updated successfully.');
       await loadAll();
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'Profile update failed');
+      setErrorText(
+        error instanceof Error
+          ? error.message === 'NETWORK_OFFLINE'
+            ? 'Cannot reach the server. Check your connection and try again.'
+            : error.message
+          : 'Profile update failed',
+      );
     } finally {
       setLoading(false);
     }
@@ -1238,95 +1208,42 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                     color={pushStatus.granted ? '#16a34a' : '#ea580c'}
                   />
                   <Text style={[s.notifStatusText, { color: pushStatus.granted ? '#16a34a' : '#ea580c' }]}>
-                    {pushStatus.granted ? 'Push notifications active' : 'Notifications disabled / not active'}
+                    {pushStatus.granted ? 'Notifications are on' : 'Notifications are off'}
                   </Text>
                 </View>
-                {Platform.OS !== 'web' && (
+                {!pushStatus.granted && Platform.OS !== 'web' && (
                   <Button
                     mode="text"
                     compact
-                    onPress={() => void import('../utils/pushRegistration').then((m) => m.openNotificationSettings())}
+                    onPress={async () => {
+                      try {
+                        const mod = await import('../utils/pushRegistration');
+                        const r = await mod.registerPushToken(token);
+                        setPushStatus((prev) => ({
+                          ...prev,
+                          granted: r.success,
+                          status: r.permissionStatus,
+                          token: r.token,
+                          checked: true,
+                          errorMessage: r.errorMessage,
+                        }));
+                        if (r.success) setInfoText('Notifications enabled.');
+                        else setErrorText(r.errorMessage || 'Could not enable notifications.');
+                      } catch (e: any) {
+                        setErrorText(e?.message || 'Could not enable notifications.');
+                      }
+                    }}
                   >
-                    Settings
+                    Enable notifications
                   </Button>
                 )}
               </View>
 
-              {pushStatus.errorMessage && (
-                <Text style={{ color: '#b45309', fontSize: 12, marginBottom: 8, fontFamily: FONT.medium }}>
-                  Status: {pushStatus.errorMessage}
+              {!pushStatus.granted && (
+                <Text style={s.notifHelpText}>
+                  Turn on notifications to get alerts when your appointment is accepted or updated.
                 </Text>
               )}
-
-              {pushStatus.token ? (
-                <Text style={{ color: COLOR.accent, fontSize: 11, marginBottom: 8 }} numberOfLines={1}>
-                  Device token: {pushStatus.token.slice(0, 28)}...
-                </Text>
-              ) : null}
-
-              <Text style={s.notifHelpText}>
-                Receive alerts when your appointment is accepted, updated, or when prescriptions and bills are ready.
-              </Text>
-
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <Button
-                  mode="outlined"
-                  loading={testingPush}
-                  disabled={testingPush}
-                  icon="refresh"
-                  onPress={async () => {
-                    setTestingPush(true);
-                    try {
-                      const mod = await import('../utils/pushRegistration');
-                      const r = await mod.registerPushToken(token);
-                      setPushStatus({
-                        granted: r.success,
-                        status: r.permissionStatus,
-                        token: r.token,
-                        checked: true,
-                        errorMessage: r.errorMessage,
-                      });
-                      if (r.success) setInfoText('Push notifications registered successfully!');
-                      else setErrorText(r.errorMessage || 'Registration failed');
-                    } catch (e: any) {
-                      setErrorText(e?.message || 'Error registering');
-                    } finally {
-                      setTestingPush(false);
-                    }
-                  }}
-                  style={[s.testPushBtn, { flex: 1 }]}
-                >
-                  Register
-                </Button>
-                <Button
-                  mode="contained"
-                  loading={testingPush}
-                  disabled={testingPush}
-                  icon="bell-outline"
-                  onPress={async () => {
-                    setTestingPush(true);
-                    try {
-                      const mod = await import('../utils/pushRegistration');
-                      await mod.sendLocalTestNotification();
-                      const srv = await mod.testServerPush(token);
-                      if (srv.success) {
-                        setInfoText('Test push sent! Check your notification bar.');
-                      } else {
-                        setErrorText(`Push test note: ${srv.message}`);
-                      }
-                    } catch (e: any) {
-                      setErrorText(`Push test error: ${e?.message}`);
-                    } finally {
-                      setTestingPush(false);
-                    }
-                  }}
-                  style={[s.primaryBtn, { flex: 1 }]}
-                  contentStyle={s.btnContent}
-                  labelStyle={s.primaryBtnText}
-                >
-                  Test Push
-                </Button>
-              </View>
             </Card.Content>
           </Card>
         </>
@@ -1338,9 +1255,18 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
               <Card.Content>
                 <Text style={s.heroEyebrow}>Our Clinic</Text>
                 <Text style={s.heroTitle}>{CLINIC_DETAILS.name}</Text>
-                <Text style={s.heroMeta}>{CLINIC_DETAILS.doctor}</Text>
-                <Text style={s.heroMeta}>{CLINIC_DETAILS.specialty}</Text>
-                <Text style={s.heroMeta}>{CLINIC_DETAILS.address}</Text>
+                <View style={s.heroRow}>
+                  <Ionicons name="person-outline" size={16} color={COLOR.surface} />
+                  <Text style={s.heroRowText}>{CLINIC_DETAILS.doctor}</Text>
+                </View>
+                <View style={s.heroRow}>
+                  <Ionicons name="medkit-outline" size={16} color={COLOR.surface} />
+                  <Text style={s.heroRowText}>{CLINIC_DETAILS.specialty}</Text>
+                </View>
+                <View style={s.heroRow}>
+                  <Ionicons name="location-outline" size={16} color={COLOR.surface} />
+                  <Text style={s.heroRowText}>{CLINIC_DETAILS.address}</Text>
+                </View>
                 <Pressable
                   onPress={() => {
                     Linking.openURL(`tel:${CLINIC_DETAILS.mobile}`).catch(() =>
@@ -1361,6 +1287,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
             <View style={s.clinicActions}>
               <Button
                 mode="contained"
+                icon="call-outline"
                 onPress={() => {
                   Linking.openURL(`tel:${CLINIC_DETAILS.mobile}`).catch(() =>
                     setErrorText(`Could not open dialer. Call ${CLINIC_DETAILS.mobile}`),
@@ -1376,6 +1303,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
               </Button>
               <Button
                 mode="outlined"
+                icon="map-outline"
                 onPress={() => {
                   const query = encodeURIComponent(CLINIC_DETAILS.address);
                   Linking.openURL(
@@ -1393,7 +1321,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
               </Button>
             </View>
 
-            <SectionCard title="Visiting Hours">
+            <SectionCard title="Visiting Hours" icon="time-outline">
               <View style={s.clinicInfoRow}>
                 <Ionicons name="time-outline" size={20} color={COLOR.primary} />
                 <Text style={[s.rowMeta, s.clinicInfoText]}>
@@ -1402,19 +1330,23 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
               </View>
             </SectionCard>
 
-            <SectionCard title="Why Patients Choose Us">
+            <SectionCard title="Why Patients Choose Us" icon="heart-outline">
               <InfoList items={CLINIC_HIGHLIGHTS} icon="heart-outline" />
             </SectionCard>
 
-            <SectionCard title="How to Use This App">
+            <SectionCard title="How to Use This App" icon="phone-outline">
               <InfoList items={HOW_TO_USE} icon="phone-outline" />
             </SectionCard>
 
-            <SectionCard title="Before You Visit">
+            <SectionCard title="Before You Visit" icon="location-outline">
               <InfoList items={BEFORE_VISIT} icon="location-outline" />
             </SectionCard>
           </>
         )}
+
+        <View style={s.footer}>
+          <Text style={s.footerText}>Built by Aazhi Foundry</Text>
+        </View>
       </ScrollView>
 
       <View style={s.bottomTabs}>
@@ -1502,11 +1434,14 @@ function updateDraft(
   setter((prev) => ({ ...prev, [key]: value }));
 }
 
-function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
+function SectionCard({ title, icon, children }: { title: string; icon?: string; children: React.ReactNode }) {
   return (
     <Card style={s.card}>
       <Card.Content>
-        <Text style={s.cardTitle}>{title}</Text>
+        <View style={s.sectionHeader}>
+          {icon ? <Ionicons name={icon as any} size={20} color={COLOR.primary} /> : null}
+          <Text style={s.cardTitle}>{title}</Text>
+        </View>
         {children}
       </Card.Content>
     </Card>
@@ -1569,14 +1504,6 @@ function formatDate(app: Appointment): string {
   return d ? d.toLocaleString() : 'Date unavailable';
 }
 
-async function safeJson(response: Response): Promise<any> {
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
-}
-
 /** Surface express-validator `errors[]`, `{error}`, or `{message}` as readable text. */
 function apiErrorMessage(payload: any, fallback: string): string {
   if (!payload) return fallback;
@@ -1626,7 +1553,7 @@ const s = StyleSheet.create({
     ...SHADOW.card,
   },
   cardLabel: { color: COLOR.primary, fontFamily: FONT.medium, fontSize: 13, marginBottom: SPACING.s },
-  cardTitle: { color: COLOR.text, fontFamily: FONT.bold, fontSize: 18, marginBottom: SPACING.s },
+  cardTitle: { flex: 1, color: COLOR.text, fontFamily: FONT.bold, fontSize: 18, marginBottom: SPACING.s },
   cardMeta: { color: COLOR.primary, fontFamily: FONT.regular, fontSize: 14, marginBottom: SPACING.xs },
   hintText: { color: COLOR.primary, fontFamily: FONT.regular, fontSize: 12, marginTop: SPACING.xs },
   maskedLine: { color: COLOR.primary, fontFamily: FONT.medium, fontSize: 13, marginBottom: SPACING.xs },
@@ -1696,6 +1623,9 @@ const s = StyleSheet.create({
     paddingVertical: SPACING.xs,
   },
   clinicInfoText: { flex: 1, marginTop: 0 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: SPACING.s },
+  heroRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.s },
+  heroRowText: { flex: 1, color: COLOR.surface, opacity: 0.85, fontFamily: FONT.regular, fontSize: 14, marginBottom: SPACING.xs },
   vitalsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.s, marginBottom: SPACING.s },
   vitalTile: {
     flexBasis: '48%',
@@ -1835,4 +1765,6 @@ const s = StyleSheet.create({
   notifStatusText: { fontFamily: FONT.medium, fontSize: 13, marginLeft: SPACING.xs },
   notifHelpText: { color: COLOR.accent, fontFamily: FONT.regular, fontSize: 12, marginBottom: SPACING.m },
   testPushBtn: { borderColor: COLOR.primary, borderRadius: RADIUS.md },
+  footer: { alignItems: 'center', marginTop: SPACING.m, marginBottom: SPACING.xs },
+  footerText: { color: COLOR.text, opacity: 0.55, fontFamily: FONT.regular, fontSize: 11, letterSpacing: 0.2 },
 });
