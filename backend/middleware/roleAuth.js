@@ -48,11 +48,32 @@ function roleAuth(roles) {
     // Re-check the live user row: a token issued before deactivation or a
     // role change must not keep working. Fail closed on DB errors.
     try {
-      const q = await pool.query('SELECT id, email, role, active FROM users WHERE id=$1', [decoded.id]);
+      let q;
+      try {
+        q = await pool.query(
+          'SELECT id, email, role, active, password_changed_at FROM users WHERE id=$1',
+          [decoded.id],
+        );
+      } catch (columnErr) {
+        // Older DBs may not have password_changed_at yet (migration 009).
+        if (columnErr && columnErr.code === '42703') {
+          q = await pool.query('SELECT id, email, role, active FROM users WHERE id=$1', [decoded.id]);
+        } else {
+          throw columnErr;
+        }
+      }
       if (q.rows.length === 0) return res.status(401).json({ error: 'Invalid token' });
       const fresh = q.rows[0];
       if (fresh.active === false) return res.status(401).json({ error: 'Account deactivated.' });
       if (!roles.includes(fresh.role)) return res.status(403).json({ error: 'Forbidden: insufficient role' });
+      // Password reset invalidates access tokens issued before the change.
+      // JWT `iat` has second precision, so allow the same-second boundary:
+      // a login immediately after a reset must not be rejected.
+      const changedAt = fresh.password_changed_at ? new Date(fresh.password_changed_at).getTime() : 0;
+      const issuedAt = typeof decoded.iat === 'number' ? decoded.iat * 1000 : 0;
+      if (changedAt && issuedAt && issuedAt + 1000 <= changedAt) {
+        return res.status(401).json({ error: 'Session expired. Please sign in again.' });
+      }
       req.user = { id: fresh.id, email: fresh.email, role: fresh.role };
       return next();
     } catch (e) {

@@ -41,4 +41,12 @@ const resetLimiter = makeLimiter({
   message: 'Too many reset attempts, please try again later.',
 });
 
-module.exports = { loginLimiter, forgotLimiter, resetLimiter };
+// Email verification codes are 6 digits; without a limit an attacker can
+// brute-force them. Same window as reset, slightly higher budget for typos.
+const verifyLimiter = makeLimiter({
+  windowMs: num('AUTH_VERIFY_WINDOW_MS', WINDOW_15_MIN),
+  limit: num('AUTH_VERIFY_MAX', 30),
+  message: 'Too many verification attempts, please try again later.',
+});
+
+module.exports = { loginLimiter, forgotLimiter, resetLimiter, verifyLimiter };

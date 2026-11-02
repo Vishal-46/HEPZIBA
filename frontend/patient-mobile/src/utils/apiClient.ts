@@ -168,6 +168,17 @@ export function createApiClient(clientOptions: ApiClientOptions = {}) {
 
 export type RNApiClient = ReturnType<typeof createApiClient>;
 
+/**
+ * True when a request failed before reaching the server (offline/DNS/timeout).
+ * Screens use this to show the offline banner instead of a generic error.
+ */
+export function isNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /Cannot reach the server|Request timed out|Network request failed|Failed to fetch/i.test(
+    error.message,
+  );
+}
+
 /** Shared singleton for screens that don't need their own 401 handler. */
 let sharedTokenProvider: TokenProvider | null = null;
 let sharedUnauthorizedHandler: (() => void) | null = null;

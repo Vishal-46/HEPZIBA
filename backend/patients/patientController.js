@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { maskPatientContact, maskPatientContacts, shouldRevealContact } = require('../utils/pii');
 
 // Register/update this patient's Expo push token for visit notifications.
 exports.savePushToken = async (req, res) => {
@@ -12,49 +13,75 @@ exports.savePushToken = async (req, res) => {
   if (!token || !isExpoToken) {
     return res.status(400).json({ error: 'Invalid push token' });
   }
+  const platform = req.body && typeof req.body.platform === 'string'
+    ? req.body.platform.trim().slice(0, 20) || null
+    : null;
+  const client = await pool.connect().catch(() => null);
+  if (!client) {
+    return res.status(500).json({ error: 'Failed to save push token' });
+  }
   try {
-    // 1. Ensure sensible column defaults
-    await pool.query(`
-      ALTER TABLE patient_push_tokens ALTER COLUMN is_active SET DEFAULT TRUE;
-      ALTER TABLE patient_push_tokens ALTER COLUMN created_at SET DEFAULT NOW();
-      ALTER TABLE patient_push_tokens ALTER COLUMN updated_at SET DEFAULT NOW();
-      ALTER TABLE patient_push_tokens ALTER COLUMN last_seen_at SET DEFAULT NOW();
-    `).catch(() => {});
-
-    // 2. Insert or update using the exact UNIQUE (user_id, token) constraint in DB
-    try {
-      await pool.query(
-        `INSERT INTO patient_push_tokens (user_id, token, platform, is_active, created_at, updated_at, last_seen_at)
-         VALUES ($1, $2, 'android', TRUE, NOW(), NOW(), NOW())
-         ON CONFLICT (user_id, token) DO UPDATE
-         SET is_active = TRUE, updated_at = NOW(), last_seen_at = NOW()`,
-        [req.user.id, token]
-      );
-    } catch (upsertErr) {
-      console.warn('savePushToken on conflict (user_id, token) notice, attempting direct insert/update:', upsertErr.message);
-      const existing = await pool.query(
-        'SELECT id FROM patient_push_tokens WHERE user_id = $1 AND token = $2',
-        [req.user.id, token]
-      );
-      if (existing.rows.length) {
-        await pool.query(
-          'UPDATE patient_push_tokens SET is_active = TRUE, updated_at = NOW(), last_seen_at = NOW() WHERE id = $1',
-          [existing.rows[0].id]
-        );
-      } else {
-        await pool.query(
-          `INSERT INTO patient_push_tokens (user_id, token, platform, is_active, created_at, updated_at, last_seen_at)
-           VALUES ($1, $2, 'android', TRUE, NOW(), NOW(), NOW())`,
-          [req.user.id, token]
-        );
-      }
-    }
-
-    console.log(`Push token saved for user ${req.user.id}: ${token}`);
-    return res.json({ message: 'Push token saved.', token });
+    await client.query('BEGIN');
+    // A physical device token can be active for exactly one account. Without
+    // this, logging in as a second user on the same phone leaves the first
+    // user's row active, and the device receives both accounts' notifications.
+    await client.query(
+      `UPDATE patient_push_tokens
+          SET is_active = FALSE,
+              updated_at = NOW()
+        WHERE token = $1
+          AND user_id <> $2
+          AND is_active IS TRUE`,
+      [token, req.user.id]
+    );
+    // Single upsert: UNIQUE (user_id, token) is created by migration 009 /
+    // the startup schema ensure. Multiple devices per patient are supported.
+    await client.query(
+      `INSERT INTO patient_push_tokens (user_id, token, platform, is_active, created_at, updated_at, last_seen_at)
+       VALUES ($1, $2, $3, TRUE, NOW(), NOW(), NOW())
+       ON CONFLICT (user_id, token) DO UPDATE
+       SET is_active = TRUE,
+           platform = COALESCE(EXCLUDED.platform, patient_push_tokens.platform),
+           updated_at = NOW(),
+           last_seen_at = NOW()`,
+      [req.user.id, token, platform]
+    );
+    await client.query('COMMIT');
+    return res.json({ message: 'Push token saved.' });
   } catch (e) {
-    console.error('Failed to save push token:', e);
-    return res.status(500).json({ error: 'Failed to save push token', details: e.message, code: e.code });
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Failed to save push token:', e.message);
+    return res.status(500).json({ error: 'Failed to save push token' });
+  } finally {
+    client.release();
+  }
+};
+
+// Deactivate this account's push token(s), e.g. on logout or account switch.
+// Only the caller's own rows can be touched; other users' tokens are never
+// deleted or reassigned. Rows are kept (is_active = FALSE) for auditability.
+exports.removePushToken = async (req, res) => {
+  const raw = req.body && req.body.token !== undefined && req.body.token !== null
+    ? String(req.body.token).trim()
+    : '';
+  try {
+    const q = raw
+      ? await pool.query(
+          `UPDATE patient_push_tokens
+              SET is_active = FALSE, updated_at = NOW()
+            WHERE user_id = $1 AND token = $2 AND is_active IS TRUE`,
+          [req.user.id, raw]
+        )
+      : await pool.query(
+          `UPDATE patient_push_tokens
+              SET is_active = FALSE, updated_at = NOW()
+            WHERE user_id = $1 AND is_active IS TRUE`,
+          [req.user.id]
+        );
+    return res.json({ message: 'Push token deactivated.', deactivated: q.rowCount });
+  } catch (e) {
+    console.error('Failed to remove push token:', e.message);
+    return res.status(500).json({ error: 'Failed to remove push token' });
   }
 };
 
@@ -69,10 +96,10 @@ exports.testPush = async (req, res) => {
       });
     }
     await sendPush(tokens, 'Hepziba Clinic', 'Test Notification: Push notifications are working properly!');
-    return res.json({ message: 'Test notification sent successfully.', tokens });
+    return res.json({ message: 'Test notification sent successfully.' });
   } catch (e) {
-    console.error('testPush error:', e);
-    return res.status(500).json({ error: 'Failed to send test push', details: e.message });
+    console.error('testPush error:', e.message);
+    return res.status(500).json({ error: 'Failed to send test push' });
   }
 };
 
@@ -106,7 +133,9 @@ exports.getMe = async (req, res) => {
       [req.user.id]
     );
     const profile = { ...userQ.rows[0], ...patientQ.rows[0] };
-    res.json(profile);
+    // Aadhaar/mobile are masked by default. The owner may request the original
+    // values for the profile editor via `?reveal=contact` (role: patient only).
+    res.json(shouldRevealContact(req, ['patient']) ? profile : maskPatientContact(profile));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to fetch profile' });
@@ -129,92 +158,126 @@ exports.updateMe = async (req, res) => {
     weight_kg,
     bp,
     spo2,
-  } = req.body;
+  } = req.body || {};
+
+  const cleanName = name !== undefined && name !== null ? String(name).trim() : '';
+  if (name !== undefined && name !== null && !cleanName) {
+    return res.status(400).json({ error: 'Name cannot be empty.' });
+  }
+  const cleanEmail = email !== undefined && email !== null ? String(email).trim().toLowerCase() : '';
+  if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).json({ error: 'Invalid email address.' });
+  }
+  const cleanMobile = mobile !== undefined && mobile !== null ? String(mobile).trim() : '';
+  if (cleanMobile && !/^\d{10,15}$/.test(cleanMobile)) {
+    return res.status(400).json({ error: 'Mobile must be 10-15 digits.' });
+  }
+  const cleanAadhaar = aadhar_number !== undefined && aadhar_number !== null
+    ? String(aadhar_number).trim()
+    : '';
+  if (cleanAadhaar && !/^\d{12}$/.test(cleanAadhaar)) {
+    return res.status(400).json({ error: 'Aadhar number must be 12 digits.' });
+  }
+  if (spo2 !== undefined && spo2 !== null && String(spo2).trim() !== '') {
+    const n = Number(spo2);
+    if (!Number.isInteger(n) || n < 0 || n > 100) {
+      return res.status(400).json({ error: 'SpO2 must be a whole number between 0 and 100.' });
+    }
+  }
+  if (age !== undefined && age !== null && String(age).trim() !== '') {
+    const n = Number(age);
+    if (!Number.isInteger(n) || n < 0 || n > 150) {
+      return res.status(400).json({ error: 'Age must be a whole number between 0 and 150.' });
+    }
+  }
+  for (const [label, value] of [['Height', height_cm], ['Weight', weight_kg]]) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) {
+        return res.status(400).json({ error: `${label} must be a positive number.` });
+      }
+    }
+  }
+
+  const nullableNumber = (value) =>
+    value === undefined || value === null || String(value).trim() === '' ? null : Number(value);
+
+  const client = await pool.connect();
   try {
-    if (email) {
-      const duplicateEmail = await pool.query(
+    await client.query('BEGIN');
+
+    if (cleanEmail) {
+      const duplicateEmail = await client.query(
         'SELECT id FROM users WHERE LOWER(email)=LOWER($1) AND id <> $2',
-        [email, req.user.id]
+        [cleanEmail, req.user.id]
       );
       if (duplicateEmail.rows.length) {
+        await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Email already in use.' });
       }
     }
 
-    if (mobile && !/^\d{10,15}$/.test(String(mobile))) {
-      return res.status(400).json({ error: 'Mobile must be 10-15 digits.' });
+    if (cleanName) {
+      await client.query('UPDATE users SET name=$1, updated_at=NOW() WHERE id=$2', [cleanName, req.user.id]);
+    }
+    if (cleanEmail) {
+      await client.query('UPDATE users SET email=$1, updated_at=NOW() WHERE id=$2', [cleanEmail, req.user.id]);
     }
 
-    if (aadhar_number && !/^\d{12}$/.test(String(aadhar_number))) {
-      return res.status(400).json({ error: 'Aadhar number must be 12 digits.' });
+    // Keep the patient row in sync. COALESCE preserves existing values when a
+    // field was not supplied, so partial profile saves never erase data.
+    const exists = (await client.query('SELECT 1 FROM patients WHERE user_id=$1', [req.user.id])).rowCount > 0;
+    const patientValues = [
+      dob || null,
+      address !== undefined && address !== null ? String(address).trim() : null,
+      nullableNumber(age),
+      sex !== undefined && sex !== null ? String(sex).trim() : null,
+      cleanMobile || null,
+      photo_url !== undefined && photo_url !== null ? String(photo_url).trim() : null,
+      cleanAadhaar || null,
+      nullableNumber(height_cm),
+      nullableNumber(weight_kg),
+      bp !== undefined && bp !== null ? String(bp).trim() : null,
+      nullableNumber(spo2),
+      req.user.id,
+    ];
+    if (exists) {
+      await client.query(
+        `UPDATE patients
+         SET dob=COALESCE($1,dob),
+             address=COALESCE($2,address),
+             age=COALESCE($3,age),
+             sex=COALESCE($4,sex),
+             mobile=COALESCE($5,mobile),
+             photo_url=COALESCE($6,photo_url),
+             aadhar_number=COALESCE($7,aadhar_number),
+             height_cm=COALESCE($8,height_cm),
+             weight_kg=COALESCE($9,weight_kg),
+             bp=COALESCE($10,bp),
+             spo2=COALESCE($11,spo2)
+         WHERE user_id=$12`,
+        patientValues
+      );
+    } else {
+      await client.query(
+        `INSERT INTO patients
+         (dob, address, age, sex, mobile, photo_url, aadhar_number, height_cm, weight_kg, bp, spo2, user_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        patientValues
+      );
     }
 
-    if (spo2 !== undefined && (Number(spo2) < 0 || Number(spo2) > 100)) {
-      return res.status(400).json({ error: 'SpO2 must be between 0 and 100.' });
-    }
-
-    if (name)
-      await pool.query('UPDATE users SET name=$1, updated_at=NOW() WHERE id=$2', [name, req.user.id]);
-    if (email)
-      await pool.query('UPDATE users SET email=$1, updated_at=NOW() WHERE id=$2', [email, req.user.id]);
-    if (
-      dob ||
-      address ||
-      age !== undefined ||
-      sex ||
-      mobile ||
-      photo_url ||
-      aadhar_number ||
-      height_cm !== undefined ||
-      weight_kg !== undefined ||
-      bp ||
-      spo2 !== undefined
-    ) {
-      // Upsert to patients
-      const exists = (await pool.query('SELECT 1 FROM patients WHERE user_id=$1', [req.user.id])).rowCount > 0;
-      if (exists) {
-        await pool.query(
-          `UPDATE patients
-           SET dob=COALESCE($1,dob),
-               address=COALESCE($2,address),
-               age=COALESCE($3,age),
-               sex=COALESCE($4,sex),
-               mobile=COALESCE($5,mobile),
-               photo_url=COALESCE($6,photo_url),
-               aadhar_number=COALESCE($7,aadhar_number),
-               height_cm=COALESCE($8,height_cm),
-               weight_kg=COALESCE($9,weight_kg),
-               bp=COALESCE($10,bp),
-               spo2=COALESCE($11,spo2)
-           WHERE user_id=$12`,
-          [
-            dob,
-            address,
-            age,
-            sex,
-            mobile,
-            photo_url,
-            aadhar_number,
-            height_cm,
-            weight_kg,
-            bp,
-            spo2,
-            req.user.id,
-          ]
-        );
-      } else {
-        await pool.query(
-          `INSERT INTO patients
-          (user_id, dob, address, age, sex, mobile, photo_url, aadhar_number, height_cm, weight_kg, bp, spo2)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-          [req.user.id, dob, address, age, sex, mobile, photo_url, aadhar_number, height_cm, weight_kg, bp, spo2]
-        );
-      }
-    }
+    await client.query('COMMIT');
     res.json({ message: 'Profile updated' });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    if (e && e.code === '23505') {
+      return res.status(400).json({ error: 'Email already in use.' });
+    }
     console.error(e);
     res.status(500).json({ error: 'Failed to update profile' });
+  } finally {
+    client.release();
   }
 };
 
@@ -241,7 +304,7 @@ exports.listPatients = async (req, res) => {
         p.id,
         p.user_id,
         p.patient_code,
-        u.name,
+        COALESCE(u.name, p.patient_code, 'Patient #' || p.id) AS name,
         u.email,
         p.age,
         p.sex,
@@ -256,7 +319,9 @@ exports.listPatients = async (req, res) => {
         p.spo2,
         u.created_at
       FROM patients p
-      JOIN users u ON u.id = p.user_id
+      -- LEFT JOIN: legacy/imported patient rows may have no linked user
+      -- account. An inner join hid them from the admin + doctor lists.
+      LEFT JOIN users u ON u.id = p.user_id
       ${whereClause}
       ORDER BY p.id DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
@@ -264,7 +329,9 @@ exports.listPatients = async (req, res) => {
     params.push(limit, offset);
 
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    // Search still matches the stored mobile/Aadhaar values, but the response
+    // never carries them unless an admin explicitly asks (`?reveal=contact`).
+    res.json(shouldRevealContact(req, ['admin']) ? result.rows : maskPatientContacts(result.rows));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to list patients' });
@@ -283,7 +350,7 @@ exports.getPatientById = async (req, res) => {
         p.id,
         p.user_id,
         p.patient_code,
-        u.name,
+        COALESCE(u.name, p.patient_code, 'Patient #' || p.id) AS name,
         u.email,
         p.age,
         p.sex,
@@ -298,13 +365,29 @@ exports.getPatientById = async (req, res) => {
         p.spo2,
         u.created_at
       FROM patients p
-      JOIN users u ON u.id = p.user_id
+      -- LEFT JOIN: a legacy patient without a login account must still open in
+      -- the chart (EHR), otherwise the history is unreachable.
+      LEFT JOIN users u ON u.id = p.user_id
       WHERE p.id=$1`,
       [patientId]
     );
 
     if (!patientQ.rows.length) return res.status(404).json({ error: 'Patient not found' });
     const patient = patientQ.rows[0];
+
+    // Policy: doctors only see invoices for patients assigned to them (an
+    // appointment row links the two). The rest of the chart stays clinic-wide
+    // as documented in docs/Hospital Details.md. Admin sees all invoices.
+    let canSeeInvoices = req.user.role === 'admin';
+    if (req.user.role === 'doctor') {
+      const docQ = await pool.query('SELECT id FROM doctors WHERE user_id=$1', [req.user.id]);
+      if (!docQ.rows.length) return res.status(403).json({ error: 'Forbidden' });
+      const assignedQ = await pool.query(
+        'SELECT 1 FROM appointments WHERE patient_id=$1 AND doctor_id=$2 LIMIT 1',
+        [patientId, docQ.rows[0].id]
+      );
+      canSeeInvoices = assignedQ.rows.length > 0;
+    }
 
     // Recent appointments
     const appQ = await pool.query(
@@ -330,24 +413,32 @@ exports.getPatientById = async (req, res) => {
       [patientId]
     );
 
-    // Recent invoices
-    const invQ = await pool.query(
-      `SELECT inv.*, json_agg(ii.*) AS items
-       FROM invoices inv
-       LEFT JOIN invoice_items ii ON ii.invoice_id = inv.id
-       WHERE inv.patient_id=$1
-       GROUP BY inv.id
-       ORDER BY inv.invoice_date DESC
-       LIMIT 15`,
-      [patientId]
-    );
+    // Recent invoices (skipped entirely when the caller is not allowed to see
+    // them, so an unrelated doctor cannot read billing data from the chart).
+    let invoiceRows = [];
+    if (canSeeInvoices) {
+      const invQ = await pool.query(
+        `SELECT inv.*, json_agg(ii.*) AS items
+         FROM invoices inv
+         LEFT JOIN invoice_items ii ON ii.invoice_id = inv.id
+         WHERE inv.patient_id=$1
+         GROUP BY inv.id
+         ORDER BY inv.invoice_date DESC
+         LIMIT 15`,
+        [patientId]
+      );
+      invoiceRows = invQ.rows.map(r => ({ ...r, items: (r.items && r.items[0] !== null) ? r.items : [] }));
+    }
 
-    res.json({
+    const chart = {
       ...patient,
       appointments: appQ.rows,
       prescriptions: rxQ.rows.map(r => ({ ...r, items: (r.items && r.items[0] !== null) ? r.items : [] })),
-      invoices: invQ.rows.map(r => ({ ...r, items: (r.items && r.items[0] !== null) ? r.items : [] }))
-    });
+      invoices: invoiceRows
+    };
+    // Aadhaar/mobile masked by default; admins may ask for originals when
+    // editing demographics (`?reveal=contact`). Doctors always get masked.
+    res.json(shouldRevealContact(req, ['admin']) ? chart : maskPatientContact(chart));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to fetch patient details' });
@@ -391,6 +482,23 @@ exports.registerWalkin = async (req, res) => {
 
   if (spo2 !== undefined && spo2 !== null && spo2 !== '' && (Number(spo2) < 0 || Number(spo2) > 100)) {
     return res.status(400).json({ error: 'SpO2 must be between 0 and 100' });
+  }
+
+  if (email !== undefined && email !== null && String(email).trim() !== '' &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+    return res.status(400).json({ error: 'Invalid email address' });
+  }
+
+  if (age !== undefined && age !== null && age !== '' &&
+      (!Number.isInteger(Number(age)) || Number(age) < 0 || Number(age) > 150)) {
+    return res.status(400).json({ error: 'Age must be a whole number between 0 and 150' });
+  }
+
+  for (const [label, value] of [['Height', height_cm], ['Weight', weight_kg]]) {
+    if (value !== undefined && value !== null && value !== '' &&
+        (!Number.isFinite(Number(value)) || Number(value) <= 0)) {
+      return res.status(400).json({ error: `${label} must be a positive number` });
+    }
   }
 
   const client = await pool.connect();
@@ -465,11 +573,11 @@ exports.registerWalkin = async (req, res) => {
           ? 'Patient registered. They sign into the app with this email + the password you set (Google sign-in with the same email also works).'
           : 'Patient registered. They sign into the app with Google using this email, or Forgot password to set one.')
         : 'Patient registered with a placeholder email — add their real email later so they can sign into the app.',
-      patient: {
+      patient: maskPatientContact({
         ...userQ.rows[0],
         ...patientQ.rows[0],
         patient_id: patientQ.rows[0].id,
-      },
+      }),
       login: { email: userQ.rows[0].email, hasPassword: appPasswordSet, googleReady: realEmail },
     });
   } catch (e) {
@@ -514,6 +622,16 @@ exports.updatePatientById = async (req, res) => {
   }
   if (spo2 !== undefined && spo2 !== null && spo2 !== '' && (Number(spo2) < 0 || Number(spo2) > 100)) {
     return res.status(400).json({ error: 'SpO2 must be between 0 and 100' });
+  }
+  if (age !== undefined && age !== null && age !== '' &&
+      (!Number.isInteger(Number(age)) || Number(age) < 0 || Number(age) > 150)) {
+    return res.status(400).json({ error: 'Age must be a whole number between 0 and 150' });
+  }
+  for (const [label, value] of [['Height', height_cm], ['Weight', weight_kg]]) {
+    if (value !== undefined && value !== null && value !== '' &&
+        (!Number.isFinite(Number(value)) || Number(value) <= 0)) {
+      return res.status(400).json({ error: `${label} must be a positive number` });
+    }
   }
 
   const client = await pool.connect();

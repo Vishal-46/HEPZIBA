@@ -4,6 +4,7 @@ import { usePaginatedSearch } from '../hooks/usePaginatedSearch';
 import type { MedicineRow, Patient } from '../types';
 import { formatDate } from '../utils/format';
 import { printPrescription } from '../utils/prescriptionPrint';
+import { normalizeAppointmentStatus as normalizeStatus } from '../utils/status';
 import EHRModal from './EHRModal';
 import { EmptyState, LoadingState, Pager, SearchInput } from './ListControls';
 
@@ -58,7 +59,7 @@ export default function DoctorPanel() {
   const stats = useMemo(() => {
     const tally = { total: appointments.length, pending: 0, confirmed: 0, done: 0, cancelled: 0 };
     appointments.forEach((a) => {
-      const s = a.status === 'completed' ? 'done' : a.status;
+      const s = normalizeStatus(a.status);
       const key = s as keyof typeof tally;
       if (typeof s === 'string' && tally[key] !== undefined) tally[key] += 1;
     });
@@ -83,28 +84,47 @@ export default function DoctorPanel() {
   );
 
   useEffect(() => {
-    if (!selectedId) {
-      setHistory(null);
-      return;
-    }
+    if (!selectedId) return;
     let alive = true;
-    setHistoryLoading(true);
-    getPrescription(selectedId)
-      .then((h) => {
-        if (alive) setHistory(h);
-      })
-      .catch(() => {
-        if (alive) setHistory(null);
-      })
-      .finally(() => {
-        if (alive) setHistoryLoading(false);
-      });
+    // Defer the first state write so the effect does not cascade a render
+    // synchronously (react-hooks/set-state-in-effect).
+    const timer = setTimeout(() => {
+      if (!alive) return;
+      setHistoryLoading(true);
+      getPrescription(selectedId)
+        .then((h) => {
+          if (alive) setHistory(h);
+        })
+        .catch(() => {
+          if (alive) setHistory(null);
+        })
+        .finally(() => {
+          if (alive) setHistoryLoading(false);
+        });
+    }, 0);
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
   }, [selectedId, getPrescription, appointments.length]);
 
   const addMedicineRow = () => setMedicines((prev) => [...prev, blankMedicine()]);
+
+  // Convert the saved prescription into the same shape the printer expects so
+  // an existing visit can be reprinted without retyping the medicines.
+  const historyMedicines = useMemo<MedicineRow[]>(
+    () =>
+      (history?.items ?? []).map((it) => ({
+        name: it.medicine_name,
+        m: Boolean(it.dosage_morning),
+        a: Boolean(it.dosage_afternoon),
+        e: Boolean(it.dosage_evening),
+        n: Boolean(it.dosage_night),
+        bf: Boolean(it.before_food),
+        af: Boolean(it.after_food),
+      })),
+    [history],
+  );
 
   const updateMedicine = (index: number, field: keyof MedicineRow, value: string | boolean) => {
     setMedicines((prev) => prev.map((m, i) => (i === index ? { ...m, [field]: value } : m)));
@@ -212,8 +232,9 @@ export default function DoctorPanel() {
                     type="button"
                     className={`appointmentRow ${selectedId === a.id ? 'active' : ''}`}
                     onClick={() => {
+                      const normalized = normalizeStatus(a.status);
                       setSelectedId(a.id);
-                      setStatus(['confirmed', 'done', 'cancelled'].includes(String(a.status)) ? String(a.status) : 'confirmed');
+                      setStatus(['confirmed', 'done', 'cancelled'].includes(normalized) ? normalized : 'confirmed');
                       setNotes(typeof a.notes === 'string' ? a.notes : '');
                       setMedicines([]);
                     }}
@@ -230,7 +251,7 @@ export default function DoctorPanel() {
                         {a.age ? `${String(a.age)}y` : ''}{a.sex ? ` · ${String(a.sex)}` : ''}{a.mobile ? ` · ${String(a.mobile)}` : ''}
                       </span>
                     </div>
-                    <span className={`pill status ${a.status || 'pending'}`}>{String(a.status || 'pending')}</span>
+                    <span className={`pill status ${normalizeStatus(a.status)}`}>{normalizeStatus(a.status)}</span>
                   </button>
                 ))}
               </div>
@@ -298,7 +319,7 @@ export default function DoctorPanel() {
                     <option value="done">done</option>
                     <option value="cancelled">cancelled</option>
                   </select>
-                  <p className="muted" style={{ marginTop: 4 }}>Current: {String(selected.status || 'pending')}</p>
+                  <p className="muted" style={{ marginTop: 4 }}>Current: {normalizeStatus(selected.status)}</p>
                 </div>
               </div>
               <label>
@@ -317,6 +338,18 @@ export default function DoctorPanel() {
                   {history.items.map((it, idx) => (
                     <span key={idx} className="muted">· {it.medicine_name}</span>
                   ))}
+                  <button
+                    type="button"
+                    className="ghostBtn"
+                    style={{ alignSelf: 'flex-start', marginTop: 8 }}
+                    onClick={() =>
+                      selected &&
+                      printPrescription(selected, historyMedicines, history.notes ?? notes)
+                    }
+                    disabled={historyMedicines.length === 0}
+                  >
+                    Reprint saved prescription / PDF
+                  </button>
                 </div>
               ) : (
                 <p className="muted">No prescription saved for this visit yet.</p>

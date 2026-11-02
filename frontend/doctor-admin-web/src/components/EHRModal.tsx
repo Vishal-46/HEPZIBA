@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import apiClient, { apiErrorMessage } from '../utils/apiClient';
-import type { Patient } from '../types';
+import type { Patient, Prescription, PrescriptionItem } from '../types';
 import { formatDate, maskAadhaar } from '../utils/format';
+import { normalizeAppointmentStatus } from '../utils/status';
 import { printInvoice } from '../utils/invoicePrint';
 import { LoadingState } from './ListControls';
 
@@ -23,7 +24,7 @@ export default function EHRModal({ patient, onClose }: Props) {
       setError('');
       try {
         const id = patient.id || patient.patient_id;
-        const res = await apiClient.get<Patient>(`/patients/${id}`);
+        const res = await apiClient.get<Patient>(`/patients/${id}?reveal=contact`);
         setData(res.data);
       } catch (err) {
         setError(apiErrorMessage(err, 'Failed to fetch electronic health records'));
@@ -149,14 +150,14 @@ export default function EHRModal({ patient, onClose }: Props) {
                       </tr>
                     </thead>
                     <tbody>
-                      {p.appointments.map((a: any) => (
+                      {p.appointments.map((a) => (
                         <tr key={a.id}>
                           <td>{formatDate(String(a.scheduled_at_effective || a.scheduled_at || ''))}</td>
                           <td><strong>Token #{String(a.token_number || a.id)}</strong></td>
                           <td>{String(a.doctor_name || 'Dr. T. Joseph Pratheeban')}</td>
                           <td>{String(a.reason || '—')}</td>
                           <td>
-                            <span className={`pill status ${String(a.status || 'pending')}`}>{String(a.status || 'pending')}</span>
+                            <span className={`pill status ${normalizeAppointmentStatus(a.status)}`}>{normalizeAppointmentStatus(a.status)}</span>
                           </td>
                         </tr>
                       ))}
@@ -173,7 +174,7 @@ export default function EHRModal({ patient, onClose }: Props) {
                   <p className="muted">No prescriptions recorded yet.</p>
                 ) : (
                   <div className="stack" style={{ gap: '12px' }}>
-                    {p.prescriptions.map((rx: any) => (
+                    {p.prescriptions.map((rx: Prescription) => (
                       <div key={rx.id} className="card" style={{ padding: '12px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                           <strong>Prescription #{rx.id} · {formatDate(rx.prescribed_on)}</strong>
@@ -189,7 +190,7 @@ export default function EHRModal({ patient, onClose }: Props) {
                             </tr>
                           </thead>
                           <tbody>
-                            {(rx.items || []).map((m: any, idx: number) => {
+                            {(rx.items || []).map((m: PrescriptionItem, idx: number) => {
                               const timing = [
                                 m.dosage_morning ? 'M' : '',
                                 m.dosage_afternoon ? 'A' : '',

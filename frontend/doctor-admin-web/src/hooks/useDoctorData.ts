@@ -11,7 +11,7 @@ export function useDoctorAppointments() {
     setLoading(true);
     setError('');
     try {
-      const res = await apiClient.get<Appointment[]>('/appointments/for-me?limit=100');
+      const res = await apiClient.get<Appointment[]>('/appointments/for-me?limit=100&reveal=contact');
       setAppointments(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
       setError(apiErrorMessage(err, 'Failed to load appointments'));

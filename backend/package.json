@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "node --test test/*.test.js",
+    "test:integration": "node --test --test-concurrency=1 test/integration/"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +27,8 @@
     "pg": "^8.20.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.12",
+    "@electric-sql/pglite-socket": "^0.2.15",
     "nodemon": "^3.1.14"
   }
 }

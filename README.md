@@ -42,14 +42,27 @@ The repository is structured as a monorepo containing the following key componen
 
 ### 1. Database Setup
 1. Create a PostgreSQL database for the project.
-2. Apply migrations in order (all idempotent; re-running is safe):
+2. Apply migrations in order (each file is safe to re-run; the one exception is `001`'s known first-run error, noted below):
    ```bash
    psql -U your_username -d your_database_name -f hepziba_schema.sql
+   # 001 is expected to fail on a fresh DB (see note below); ON_ERROR_STOP stays off here.
    psql -U your_username -d your_database_name -f backend/sql/001_hospital_alignment.sql
-   psql -U your_username -d your_database_name -f backend/sql/002_fix_doctors_and_constraints.sql
-   psql -U your_username -d your_database_name -f backend/sql/005_session_tokens.sql
+   psql -v ON_ERROR_STOP=1 --single-transaction -U your_username -d your_database_name -f backend/sql/002_fix_doctors_and_constraints.sql
+   # No-op on a fresh DB; repairs columns on databases created by older DDL.
+   psql -v ON_ERROR_STOP=1 --single-transaction -U your_username -d your_database_name -f backend/sql/004_repair_clinic_columns.sql
+   psql -v ON_ERROR_STOP=1 --single-transaction -U your_username -d your_database_name -f backend/sql/005_session_tokens.sql
+   psql -v ON_ERROR_STOP=1 --single-transaction -U your_username -d your_database_name -f backend/sql/006_clinic_settings.sql
+   psql -v ON_ERROR_STOP=1 --single-transaction -U your_username -d your_database_name -f backend/sql/007_inventory_mrp_expiry.sql
+   psql -v ON_ERROR_STOP=1 --single-transaction -U your_username -d your_database_name -f backend/sql/008_billing_fee_push.sql
+   psql -v ON_ERROR_STOP=1 --single-transaction -U your_username -d your_database_name -f backend/sql/009_consistency_hardening.sql
    ```
-   This sets up `users`, `patients`, `doctors`, `appointments`, plus prescriptions/billing/inventory tables, then `refresh_tokens` + `revoked_access_tokens` for sessions. Note: on a fresh DB, `001` may stop at `prescriptions` with `relation "doctors" does not exist` (it references `doctors` before it exists); `002` creates `doctors` and any missing tables, so just continue to `002`. See `db-schema.md` and `backend/sql/README.md` for details and verification steps.
+   This sets up `users`, `patients`, `doctors`, `appointments`, plus prescriptions/billing/inventory tables, `refresh_tokens` + `revoked_access_tokens` for sessions, clinic settings, inventory MRP/expiry, the doctor fee column, and multi-device push tokens. Note: on a fresh DB, `001` is expected to emit exactly two errors — `prescriptions` cannot reference `doctors` before `002` creates it, and `prescription_items` then cannot reference `prescriptions`. `002` repairs both; any other error must stop the run. See `db-schema.md`, `backend/sql/README.md`, and `backend/test/REAL_POSTGRES.md` for the guarded procedure.
+
+   At startup the backend verifies that every database session is UTC and that
+   the objects required by migrations `005`–`009` exist. A non-UTC session is
+   fatal by default; a partial schema is fatal in production (or with
+   `SCHEMA_STRICT=1`). See `backend/.env.example` for `DB_DISABLE_UTC_OPTIONS`,
+   `DB_REQUIRE_UTC`, and `SCHEMA_STRICT`.
 
 ### 2. Backend Setup
 1. Navigate to the backend directory: `cd backend`

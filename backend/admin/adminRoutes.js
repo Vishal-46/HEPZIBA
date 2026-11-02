@@ -10,6 +10,8 @@ router.put('/users/:id', roleAuth('admin'), ctrl.updateUser);
 router.delete('/users/:id', roleAuth('admin'), ctrl.deleteUser);
 router.get('/appointments', roleAuth('admin'), ctrl.listAppointments);
 router.patch('/appointments/:id', roleAuth('admin'), ctrl.updateAppointmentStatus);
+// Dedicated audited correction: the only way to leave a terminal status.
+router.post('/appointments/:id/reopen', roleAuth('admin'), ctrl.reopenAppointment);
 router.get('/settings', roleAuth(['admin', 'doctor']), ctrl.getSettings);
 router.post('/settings', roleAuth('admin'), ctrl.updateSettings);
 

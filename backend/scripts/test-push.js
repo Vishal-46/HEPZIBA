@@ -28,7 +28,7 @@ async function main() {
     tokens = [target];
   }
 
-  console.log(`Sending test push to ${tokens.length} token(s):`, tokens);
+  console.log(`Sending test push to ${tokens.length} device(s).`);
   await sendPush(tokens, title, body, { test: true });
   console.log('Done.');
   process.exit(0);

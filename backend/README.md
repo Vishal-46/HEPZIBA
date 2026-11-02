@@ -39,7 +39,17 @@ Access JWTs carry `jti`+role and are checked by `middleware/roleAuth.js`
 
 Apply in order (all idempotent): base `hepziba_schema.sql`, then
 `001_hospital_alignment.sql`, `002_fix_doctors_and_constraints.sql`,
-`005_session_tokens.sql` (refresh + denylist tables). See `sql/README.md`.
+`005_session_tokens.sql` (refresh + denylist tables), `006_clinic_settings.sql`,
+`007_inventory_mrp_expiry.sql`, `008_billing_fee_push.sql`,
+`009_consistency_hardening.sql`, and `010_policy_batch.sql` (audited visit
+corrections + durable reminders) with `-v ON_ERROR_STOP=1 --single-transaction`.
+See `sql/README.md` and the guarded real-PostgreSQL procedure in
+`test/REAL_POSTGRES.md`.
+
+At startup `db.js` enforces a UTC session and checks that the objects required
+by `005`–`010` exist. Production refuses to start on a partial schema. See
+`DB_REQUIRE_UTC`, `DB_DISABLE_UTC_OPTIONS`, and `SCHEMA_STRICT` in
+`.env.example`.
 
 ## Public pages
 
@@ -51,4 +61,12 @@ Apply in order (all idempotent): base `hepziba_schema.sql`, then
 `DATABASE_URL`, `JWT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_REDIRECT_URI` (= `https://<host>/auth/google/callback`, whitelisted in
 Google Console), `MOBILE_GOOGLE_REDIRECT=patient-mobile://auth`,
-`RESEND_API_KEY`, `RESEND_FROM`, `CORS_ORIGIN`, `FRONTEND_URL`.
+`RESEND_API_KEY`, `RESEND_FROM`, `CORS_ORIGIN`, `FRONTEND_URL`,
+`DB_DISABLE_UTC_OPTIONS`, `DB_REQUIRE_UTC`, `SCHEMA_STRICT`,
+`APPOINTMENT_REMINDER_OFFSET_MINUTES`.
+
+Appointment reminders are disabled unless `APPOINTMENT_REMINDER_OFFSET_MINUTES`
+is set. `index.js` starts the durable polling worker; Vercel/serverless
+deployments must invoke `utils/reminders.js` from a separate scheduled process.
+Push delivery is best-effort and payloads never include patient or clinical
+data; see `docs/API_REFERENCE.md`.

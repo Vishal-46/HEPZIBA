@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import apiClient, { apiErrorMessage } from '../utils/apiClient';
 import type { Patient } from '../types';
 import { maskAadhaar } from '../utils/format';
@@ -24,6 +24,8 @@ export default function PatientManagement({
   const [success, setSuccess] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [page, setPage] = useState(1);
+  // Guards against out-of-order search responses overwriting newer results.
+  const requestSeq = useRef(0);
 
   // New patient modal state
   const [showModal, setShowModal] = useState(false);
@@ -44,24 +46,32 @@ export default function PatientManagement({
     photo_url: '',
   });
 
-  const loadPatients = async (query = '') => {
+  const loadPatients = useCallback(async (query = '') => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError('');
     try {
       const res = await apiClient.get<Patient[]>('/patients', {
         params: { q: query || undefined, limit: 100 },
       });
+      if (seq !== requestSeq.current) return;
       setPatients(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setError(apiErrorMessage(err, 'Failed to load patients'));
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  };
+  }, []);
 
+  // Wait for a short pause in typing before hitting the API, and only load
+  // the settled query so fast typing cannot race older responses.
   useEffect(() => {
-    loadPatients(searchQuery);
-  }, [searchQuery]);
+    const timer = setTimeout(() => {
+      void loadPatients(searchQuery.trim());
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, loadPatients]);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,7 +131,7 @@ export default function PatientManagement({
         spo2: '',
         photo_url: '',
       });
-      loadPatients();
+      loadPatients(searchQuery.trim());
     } catch (err) {
       setError(apiErrorMessage(err, 'Failed to register patient'));
     } finally {
@@ -146,21 +156,34 @@ export default function PatientManagement({
     spo2: '',
   });
 
-  const openEdit = (p: Patient) => {
+  const openEdit = async (p: Patient) => {
+    // The list is masked by policy. Fetch the record with the admin-only
+    // `reveal=contact` exception so the edit form is pre-filled with the
+    // stored mobile/Aadhaar instead of the masked display values.
+    let full = p;
+    const pid = (p as Patient & { patient_id?: number }).patient_id ?? p.id;
+    try {
+      const res = await apiClient.get<Patient>(`/patients/${pid}`, {
+        params: { reveal: 'contact' },
+      });
+      if (res.data) full = { ...p, ...res.data };
+    } catch {
+      // Fall back to the list row; other fields are still editable.
+    }
     setEditForm({
-      name: p.name ?? '',
-      email: p.email ?? '',
-      age: p.age !== undefined && p.age !== null ? String(p.age) : '',
-      sex: p.sex ?? 'Male',
-      mobile: p.mobile ?? '',
-      address: p.address ?? '',
-      aadhar_number: p.aadhar_number ?? '',
-      height_cm: p.height_cm !== undefined && p.height_cm !== null ? String(p.height_cm) : '',
-      weight_kg: p.weight_kg !== undefined && p.weight_kg !== null ? String(p.weight_kg) : '',
-      bp: p.bp ?? '',
-      spo2: p.spo2 !== undefined && p.spo2 !== null ? String(p.spo2) : '',
+      name: full.name ?? '',
+      email: full.email ?? '',
+      age: full.age !== undefined && full.age !== null ? String(full.age) : '',
+      sex: full.sex ?? 'Male',
+      mobile: full.mobile ?? '',
+      address: full.address ?? '',
+      aadhar_number: full.aadhar_number ?? '',
+      height_cm: full.height_cm !== undefined && full.height_cm !== null ? String(full.height_cm) : '',
+      weight_kg: full.weight_kg !== undefined && full.weight_kg !== null ? String(full.weight_kg) : '',
+      bp: full.bp ?? '',
+      spo2: full.spo2 !== undefined && full.spo2 !== null ? String(full.spo2) : '',
     });
-    setEditing(p);
+    setEditing(full);
     setError('');
     setSuccess('');
   };
@@ -209,7 +232,7 @@ export default function PatientManagement({
       });
       setSuccess(`Updated ${editForm.name.trim()} — vitals saved${editForm.bp.trim() || editForm.spo2.trim() ? ` (BP ${editForm.bp.trim() || '—'}, SpO2 ${editForm.spo2.trim() || '—'})` : ''}.`);
       setEditing(null);
-      loadPatients();
+      loadPatients(searchQuery.trim());
     } catch (err) {
       setError(apiErrorMessage(err, 'Failed to update patient'));
     } finally {
@@ -231,7 +254,7 @@ export default function PatientManagement({
           <button className="primaryBtn" onClick={() => setShowModal(true)}>
             + Register New Patient
           </button>
-          <button className="ghostBtn" onClick={() => loadPatients(searchQuery)} disabled={loading}>
+          <button className="ghostBtn" onClick={() => loadPatients(searchQuery.trim())} disabled={loading}>
             Refresh
           </button>
         </div>

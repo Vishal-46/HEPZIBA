@@ -6,6 +6,7 @@ const { hashPassword, checkPassword, generateCode, generateSecureToken } = requi
 const { sendMail } = require('../mailer/mailer');
 const { verificationEmail, passwordResetEmail } = require('../mailer/templates');
 const { generateUniquePatientCode } = require('../utils/patientCode');
+const { isAllowedMobileRedirect } = require('../utils/redirects');
 
 // True when a 23505 unique violation concerns patients.patient_code.
 // Inspects the constraint/detail when the driver provides them; a bare
@@ -279,14 +280,18 @@ exports.verifyEmail = async (req, res) => {
   const trimmedCode = String(code).trim();
   try {
     const q = await pool.query(
-      `SELECT id, verification_code, verification_code_expires_at, email_verified FROM users WHERE email=$1`,
+      `SELECT id, verification_code, email_verified,
+              (verification_code_expires_at IS NOT NULL AND verification_code_expires_at > NOW()) AS code_valid
+         FROM users WHERE email=$1`,
       [normalizedEmail]
     );
     if (!q.rows.length) return res.status(400).json({ error: 'Invalid code.' });
     const user = q.rows[0];
     if (user.email_verified) return res.json({ message: 'Email already verified. Please log in.' });
-    if (!user.verification_code || user.verification_code !== trimmedCode ||
-        !user.verification_code_expires_at || new Date(user.verification_code_expires_at) < new Date()) {
+    // Expiry is evaluated by Postgres. `verification_code_expires_at` is a
+    // TIMESTAMP (no time zone); parsing it in Node would silently shift the
+    // value by the process timezone offset and reject fresh codes.
+    if (!user.verification_code || user.verification_code !== trimmedCode || !user.code_valid) {
       return res.status(400).json({ error: 'Invalid or expired code.' });
     }
     await pool.query(
@@ -426,20 +431,40 @@ exports.resetPassword = async (req, res) => {
   try {
     // M1: no email_verified gate — reset works for any existing account.
     const q = await pool.query(
-      `SELECT id, reset_code, reset_code_expires_at FROM users WHERE email=$1`,
+      `SELECT id, reset_code,
+              (reset_code_expires_at IS NOT NULL AND reset_code_expires_at > NOW()) AS code_valid
+         FROM users WHERE email=$1`,
       [normalizedEmail]
     );
     if (!q.rows.length) return res.status(400).json({ error: 'Invalid code.' });
     const user = q.rows[0];
-    if (user.reset_code !== code ||
-        new Date(user.reset_code_expires_at) < new Date()) {
+    // Evaluate expiry in Postgres: reset_code_expires_at is TIMESTAMP without
+    // time zone, so JS Date parsing depends on the Node process timezone.
+    if (user.reset_code !== code || !user.code_valid) {
       return res.status(400).json({ error: 'Invalid or expired code.' });
     }
     const hashed = await hashPassword(newPassword);
-    await pool.query(
-      `UPDATE users SET password=$1, reset_code=NULL, reset_code_expires_at=NULL WHERE id=$2`,
-      [hashed, user.id]
-    );
+    // A password reset must invalidate every existing session. Refresh tokens
+    // are revoked immediately; access tokens are rejected by roleAuth once
+    // password_changed_at is newer than the token's iat.
+    // Password + invalidation marker change together so a reset can never
+    // leave old sessions valid because the second UPDATE failed.
+    try {
+      await pool.query(
+        `UPDATE users
+         SET password=$1, reset_code=NULL, reset_code_expires_at=NULL, password_changed_at=NOW()
+         WHERE id=$2`,
+        [hashed, user.id]
+      );
+    } catch (e) {
+      if (!e || e.code !== '42703') throw e;
+      // Older DB without password_changed_at: refresh revocation still applies.
+      await pool.query(
+        `UPDATE users SET password=$1, reset_code=NULL, reset_code_expires_at=NULL WHERE id=$2`,
+        [hashed, user.id]
+      );
+    }
+    await revokeAllUserRefreshTokens(user.id);
     res.json({ message: 'Password reset successful, you may now log in.' });
   } catch (e) {
     console.error(e);
@@ -593,18 +618,7 @@ function getGoogleOAuthConfig() {
 }
 
 // Only allow returning the JWT to our own app schemes — prevents open-redirect.
-function isAllowedMobileRedirect(url) {
-  if (!url || typeof url !== 'string') return false;
-  const u = url.trim();
-  return (
-    u.startsWith('patient-mobile://') ||
-    u.startsWith('exp://') ||
-    u.startsWith('http://localhost') ||
-    u.startsWith('http://127.0.0.1') ||
-    u.startsWith('http://192.168.') ||
-    u.startsWith('http://10.')
-  );
-}
+// See utils/redirects.js: Expo Go/LAN redirects are development-only.
 
 // Stateless OAuth state (Vercel-safe): no in-memory Map, since serverless
 // invocations may hit different lambdas. state = base64url(payload).sig where

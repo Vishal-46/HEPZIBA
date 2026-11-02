@@ -1,5 +1,10 @@
 // Doctor controller: profile and appointment actions
 const pool = require('../db');
+const {
+  normalizeAppointmentStatus,
+  allowedFromStatuses,
+  canonicalStatusSql,
+} = require('../utils/appointmentStatus');
 
 // GET /doctors/me - View doctor profile
 exports.getMe = async (req, res) => {
@@ -19,23 +24,72 @@ exports.getMe = async (req, res) => {
 
 // PUT /doctors/me - Update doctor profile
 exports.updateMe = async (req, res) => {
-  const { name, email, specialty, phone, bio } = req.body;
+  const { name, email, specialty, phone, bio } = req.body || {};
+
+  const cleanName = name !== undefined && name !== null ? String(name).trim() : '';
+  if (name !== undefined && name !== null && !cleanName) {
+    return res.status(400).json({ error: 'Name cannot be empty.' });
+  }
+  const cleanEmail = email !== undefined && email !== null ? String(email).trim().toLowerCase() : '';
+  if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).json({ error: 'Invalid email address.' });
+  }
+
+  const client = await pool.connect();
   try {
-    if (name)
-      await pool.query('UPDATE users SET name=$1, updated_at=NOW() WHERE id=$2', [name, req.user.id]);
-    if (email)
-      await pool.query('UPDATE users SET email=$1, updated_at=NOW() WHERE id=$2', [email, req.user.id]);
-    if (specialty || phone || bio) {
-      const exists = (await pool.query('SELECT 1 FROM doctors WHERE user_id=$1', [req.user.id])).rowCount > 0;
-      if (exists) {
-        await pool.query('UPDATE doctors SET specialty=COALESCE($1,specialty), phone=COALESCE($2,phone), bio=COALESCE($3,bio) WHERE user_id=$4', [specialty, phone, bio, req.user.id]);
-      } else {
-        await pool.query('INSERT INTO doctors (user_id, specialty, phone, bio) VALUES ($1,$2,$3,$4)', [req.user.id, specialty, phone, bio]);
+    await client.query('BEGIN');
+
+    if (cleanEmail) {
+      const dup = await client.query(
+        'SELECT id FROM users WHERE LOWER(email)=LOWER($1) AND id<>$2',
+        [cleanEmail, req.user.id]
+      );
+      if (dup.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Email already in use.' });
       }
     }
+
+    if (cleanName) {
+      await client.query('UPDATE users SET name=$1, updated_at=NOW() WHERE id=$2', [cleanName, req.user.id]);
+    }
+    if (cleanEmail) {
+      await client.query('UPDATE users SET email=$1, updated_at=NOW() WHERE id=$2', [cleanEmail, req.user.id]);
+    }
+    if (specialty !== undefined || phone !== undefined || bio !== undefined) {
+      const exists = (await client.query('SELECT 1 FROM doctors WHERE user_id=$1', [req.user.id])).rowCount > 0;
+      const values = [
+        specialty !== undefined && specialty !== null ? String(specialty).trim() : null,
+        phone !== undefined && phone !== null ? String(phone).trim() : null,
+        bio !== undefined && bio !== null ? String(bio).trim() : null,
+        req.user.id,
+      ];
+      if (exists) {
+        await client.query(
+          `UPDATE doctors
+           SET specialty=COALESCE($1,specialty), phone=COALESCE($2,phone), bio=COALESCE($3,bio)
+           WHERE user_id=$4`,
+          values
+        );
+      } else {
+        await client.query(
+          'INSERT INTO doctors (user_id, specialty, phone, bio) VALUES ($4,$1,$2,$3)',
+          values
+        );
+      }
+    }
+
+    await client.query('COMMIT');
     res.json({ message: 'Profile updated' });
   } catch (e) {
-    console.error(e); res.status(500).json({ error: 'Failed to update profile' });
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    if (e && e.code === '23505') {
+      return res.status(400).json({ error: 'Email already in use.' });
+    }
+    console.error(e);
+    res.status(500).json({ error: 'Failed to update profile' });
+  } finally {
+    client.release();
   }
 };
 
@@ -61,83 +115,89 @@ exports.getAppointment = async (req, res) => {
 
 // PATCH /doctors/appointments/:id - Update appointment (status/notes)
 exports.updateAppointment = async (req, res) => {
-  const { status, notes } = req.body;
-  // Live DB enum uses 'completed'; API + docs use 'done' — accept both, store 'completed'.
-  const DOCTOR_STATUSES = ['confirmed', 'done', 'completed', 'cancelled'];
-  const toDb = (s) => (s === 'done' ? 'completed' : s);
+  const { status, notes } = req.body || {};
+  // Canonical statuses only: DB/API/docs use `done` (legacy `completed` is
+  // normalised, never written).
+  const DOCTOR_STATUSES = ['confirmed', 'done', 'cancelled'];
   try {
+    const appointmentId = Number(req.params.id);
+    if (!Number.isInteger(appointmentId)) {
+      return res.status(400).json({ error: 'Invalid appointment id' });
+    }
     const docQ = await pool.query('SELECT id FROM doctors WHERE user_id=$1', [req.user.id]);
     if (!docQ.rows.length) return res.status(400).json({ error: 'Doctor profile not found' });
     const doctor_id = docQ.rows[0].id;
-    // Only assigned appointments (doctor owns appointment):
-    const appQ = await pool.query('SELECT * FROM appointments WHERE id=$1 AND doctor_id=$2', [req.params.id, doctor_id]);
-    if (!appQ.rows.length) return res.status(404).json({ error: 'Appointment not found or not assigned' });
+
     let nextStatus = null;
     if (status !== undefined && status !== null) {
-      nextStatus = String(status).trim();
-      if (!DOCTOR_STATUSES.includes(nextStatus)) {
+      nextStatus = normalizeAppointmentStatus(status);
+      if (!nextStatus || !DOCTOR_STATUSES.includes(nextStatus)) {
         return res.status(400).json({ error: `status must be one of ${DOCTOR_STATUSES.join('|')}` });
       }
     }
-    const cleanNotes = notes !== undefined && notes !== null ? String(notes).trim() || null : null;
-
-    const statusesToTry = [];
-    if (nextStatus === 'done') statusesToTry.push('done', 'completed');
-    else if (nextStatus === 'completed') statusesToTry.push('completed', 'done');
-    else if (nextStatus) statusesToTry.push(nextStatus);
-    else statusesToTry.push(null);
-
-    let updated = false;
-    let lastError = null;
-
-    for (const targetStatus of statusesToTry) {
-      try {
-        await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [targetStatus, cleanNotes, req.params.id]);
-        updated = true;
-        break;
-      } catch (err) {
-        lastError = err;
-        if (err.code === '42703' && String(err.message).includes('notes')) {
-          await pool.query('ALTER TABLE appointments ADD COLUMN IF NOT EXISTS notes TEXT').catch(() => {});
-          try {
-            await pool.query('UPDATE appointments SET status=COALESCE($1,status), notes=COALESCE($2,notes) WHERE id=$3', [targetStatus, cleanNotes, req.params.id]);
-            updated = true;
-            break;
-          } catch (retryErr) {
-            try {
-              await pool.query('UPDATE appointments SET status=COALESCE($1,status) WHERE id=$2', [targetStatus, req.params.id]);
-              updated = true;
-              break;
-            } catch (fallbackErr) {
-              lastError = fallbackErr;
-            }
-          }
-        }
-      }
+    const notesProvided = notes !== undefined;
+    const cleanNotes = notes === undefined || notes === null ? null : String(notes).trim() || null;
+    if (!nextStatus && !notesProvided) {
+      return res.status(400).json({ error: 'No fields to update' });
     }
 
-    if (!updated) {
-      console.error('Doctor update appointment DB error:', lastError);
-      return res.status(500).json({ error: 'Failed to update appointment', details: lastError ? lastError.message : undefined });
+    // Only assigned appointments (doctor owns appointment). The CTE locks the
+    // row and captures its current status, so the transition guard, the write,
+    // and the "did it actually change?" check all see the same row version.
+    // A concurrent request that already moved the visit is therefore rejected
+    // (or treated as an idempotent no-op) instead of overwriting it.
+    const fromStatuses = nextStatus ? allowedFromStatuses(nextStatus) : null;
+    const transitionGuard = fromStatuses
+      ? `AND ${canonicalStatusSql('prev.status')} IN (${fromStatuses.map((s) => `'${s}'`).join(', ')})`
+      : '';
+
+    // One statement: `notes` is only replaced when the caller sent the field,
+    // so an explicit empty string can clear a previous visit note.
+    const q = await pool.query(
+      `WITH prev AS (
+         SELECT id, status FROM appointments WHERE id=$4 AND doctor_id=$5 FOR UPDATE
+       )
+       UPDATE appointments a
+       SET status = COALESCE($1, a.status),
+           notes = CASE WHEN $2 THEN $3 ELSE a.notes END
+       FROM prev
+       WHERE a.id = prev.id ${transitionGuard}
+       RETURNING a.status AS status, prev.status AS previous_status`,
+      [nextStatus, notesProvided, cleanNotes, appointmentId, doctor_id]
+    );
+    if (!q.rows.length) {
+      const curQ = await pool.query(
+        `SELECT ${canonicalStatusSql('status')} AS status FROM appointments WHERE id=$1 AND doctor_id=$2`,
+        [appointmentId, doctor_id]
+      );
+      if (!curQ.rows.length) return res.status(404).json({ error: 'Appointment not found or not assigned' });
+      return res.status(409).json({
+        error: `Cannot change appointment from '${curQ.rows[0].status}' to '${nextStatus}'`,
+      });
     }
+    const previousStatus = normalizeAppointmentStatus(q.rows[0].previous_status);
+    const statusChanged = Boolean(nextStatus) && nextStatus !== previousStatus;
 
     try {
       const { notifyAppointmentOwner } = require('../utils/push');
       const msg = cleanNotes || '';
-      const done = nextStatus === 'done' || nextStatus === 'completed';
-      if (nextStatus === 'confirmed') {
-        await notifyAppointmentOwner(Number(req.params.id), 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
+      // Do not re-notify when the status was already the requested one
+      // (idempotent re-submit / retry).
+      if (!statusChanged) {
+        // no status change — nothing to announce
+      } else if (nextStatus === 'confirmed') {
+        await notifyAppointmentOwner(appointmentId, 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
       } else if (nextStatus === 'cancelled') {
-        await notifyAppointmentOwner(Number(req.params.id), 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
-      } else if (done) {
-        await notifyAppointmentOwner(Number(req.params.id), 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
+        await notifyAppointmentOwner(appointmentId, 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
+      } else if (nextStatus === 'done') {
+        await notifyAppointmentOwner(appointmentId, 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
       }
     } catch (pushErr) {
-      console.error('Doctor push notification failed:', pushErr);
+      console.error('Doctor push notification failed:', pushErr.message);
     }
-    res.json({ message: 'Appointment updated' });
+    res.json({ message: 'Appointment updated', appointment: { id: appointmentId, status: q.rows[0].status } });
   } catch (e) {
-    console.error('Unexpected error in doctor updateAppointmentStatus:', e);
-    res.status(500).json({ error: 'Failed to update appointment', details: e.message });
+    console.error('Unexpected error in doctor updateAppointment:', e);
+    res.status(500).json({ error: 'Failed to update appointment' });
   }
 };

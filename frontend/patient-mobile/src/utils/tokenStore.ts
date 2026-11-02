@@ -12,6 +12,7 @@ import type { Session, User } from './sessionTypes';
 const TOKEN_KEY = 'hepziba.auth.token';
 const USER_KEY = 'hepziba.auth.user';
 const REFRESH_KEY = 'hepziba.auth.refresh';
+const PUSH_KEY = 'hepziba.push.token';
 
 const memoryFallback = new Map<string, string>();
 
@@ -98,4 +99,18 @@ export async function loadSession(): Promise<Session | null> {
 
 export async function clearSession(): Promise<void> {
   await Promise.all([storeDelete(TOKEN_KEY), storeDelete(USER_KEY), storeDelete(REFRESH_KEY)]);
+}
+
+// The Expo push token for this device, kept so logout can deactivate exactly
+// this device's registration for the account that is signing out.
+export async function savePushToken(token: string): Promise<void> {
+  await storeSet(PUSH_KEY, token);
+}
+
+export async function loadPushToken(): Promise<string | null> {
+  return storeGet(PUSH_KEY);
+}
+
+export async function clearPushToken(): Promise<void> {
+  await storeDelete(PUSH_KEY);
 }

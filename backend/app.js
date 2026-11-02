@@ -35,7 +35,24 @@ app.use(cors({
 }));
 
 const errorHandler = require('./middleware/errorHandler');
+const roleAuth = require('./middleware/roleAuth');
 app.use(express.json());
+
+// Refuse API traffic until db.js has verified the UTC session and the required
+// schema. Static/liveness pages stay available so a process can report its
+// state without a usable database.
+const db = require('./db');
+const DB_INDEPENDENT_PATHS = new Set(['/health', '/', '/privacy', '/terms']);
+app.use(async (req, res, next) => {
+  if (DB_INDEPENDENT_PATHS.has(req.path)) return next();
+  try {
+    await db.ready;
+    return next();
+  } catch (err) {
+    console.error('[app] database not ready:', err.message);
+    return res.status(503).json({ error: 'Database is not ready. Apply migrations 001-010.' });
+  }
+});
 
 // Mount authentication endpoints
 app.use('/auth', require('./auth/authRoutes'));
@@ -56,19 +73,8 @@ app.use('/inventory', require('./inventory/inventoryRoutes'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-const pushLogs = [];
-app.post('/push-log', async (req, res) => {
-  const logEntry = {
-    receivedAt: new Date().toISOString(),
-    body: req.body,
-    ip: req.ip,
-  };
-  pushLogs.unshift(logEntry);
-  if (pushLogs.length > 50) pushLogs.pop();
-  console.log('Device push log received:', JSON.stringify(req.body));
-  return res.json({ ok: true });
-});
-
+// Diagnostic push-inspection tool. Admin-only: it reads patient/appointment
+// rows and device push tokens, so it must never be reachable anonymously.
 const debugPushHandler = async (req, res) => {
   const pool = require('./db');
   const { tokensForUser, notifyAppointmentOwner } = require('./utils/push');
@@ -83,11 +89,12 @@ const debugPushHandler = async (req, res) => {
       const apptRes = await pool.query('SELECT * FROM appointments WHERE id = $1', [appointmentId]);
       appointment = apptRes.rows[0] || null;
       if (appointment) {
+        // Same ownership rule as utils/push.js: patients.id -> patients.user_id.
+        // Never fall back to appointments.patient_id as a user id.
         const ownerRes = await pool.query(
-          `SELECT COALESCE(p.user_id, p_by_user.user_id, a.patient_id) AS user_id
+          `SELECT p.user_id AS user_id
            FROM appointments a
-           LEFT JOIN patients p ON p.id = a.patient_id
-           LEFT JOIN patients p_by_user ON p_by_user.user_id = a.patient_id
+           JOIN patients p ON p.id = a.patient_id
            WHERE a.id = $1`,
           [appointmentId]
         );
@@ -95,10 +102,7 @@ const debugPushHandler = async (req, res) => {
         if (apptOwnerUserId) {
           appointmentTokens = await tokensForUser(apptOwnerUserId);
         }
-        const patRes = await pool.query(
-          'SELECT * FROM patients WHERE id = $1 OR user_id = $1',
-          [appointment.patient_id]
-        );
+        const patRes = await pool.query('SELECT * FROM patients WHERE id = $1', [appointment.patient_id]);
         patient = patRes.rows[0] || null;
       }
     }
@@ -125,21 +129,22 @@ const debugPushHandler = async (req, res) => {
       schemaInfo,
       appointmentId,
       appointment,
-      patient,
+      // Debug output must not bypass the default contact masking.
+      patient: patient ? require('./utils/pii').maskPatientContact(patient) : null,
       apptOwnerUserId,
       appointmentTokens,
       allTokensInDb: allTokensRes.rows,
       recentAppointments: recentAppointmentsRes.rows,
       recentUsers: recentUsersRes.rows,
       pushResult,
-      recentDeviceLogs: pushLogs,
     });
   } catch (e) {
-    return res.status(500).json({ error: e.message, stack: e.stack });
+    console.error('debug-push failed:', e);
+    return res.status(500).json({ error: 'Debug lookup failed.' });
   }
 };
-app.get('/debug-push', debugPushHandler);
-app.get('/debug-push/:appointmentId', debugPushHandler);
+app.get('/debug-push', roleAuth('admin'), debugPushHandler);
+app.get('/debug-push/:appointmentId', roleAuth('admin'), debugPushHandler);
 
 // Public legal pages (also satisfy Google OAuth publishing, which requires
 // an app homepage, privacy policy and terms on an authorized domain).

@@ -1,6 +1,6 @@
 const pool = require('../db');
-
-const APPOINTMENT_STATUSES = ['pending', 'confirmed', 'done', 'cancelled'];
+const { APPOINTMENT_STATUSES, normalizeAppointmentStatus } = require('../utils/appointmentStatus');
+const { maskPatientContacts, shouldRevealContact } = require('../utils/pii');
 
 function parsePagination(req, defaultLimit = 20, maxLimit = 100) {
   let limit = Number(req.query.limit ?? defaultLimit);
@@ -20,7 +20,7 @@ exports.createAppointment = async (req, res) => {
   let doctorIdNum = Number(req.body.doctor_id);
   const doctorIdProvided = Number.isInteger(doctorIdNum) && doctorIdNum >= 1;
   if (rawScheduled === undefined || rawScheduled === null || String(rawScheduled).trim() === '') {
-    return res.status(400).json({ error: 'doctor_id and scheduled_at required' });
+    return res.status(400).json({ error: 'scheduled_at required' });
   }
 
   const scheduledAtDate = new Date(rawScheduled);
@@ -42,6 +42,10 @@ exports.createAppointment = async (req, res) => {
   const MAX_ATTEMPTS = 3;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const client = await pool.connect();
+    let released = false;
+    const releaseClient = () => {
+      if (!released) { released = true; client.release(); }
+    };
     try {
       await client.query('BEGIN');
 
@@ -72,7 +76,8 @@ exports.createAppointment = async (req, res) => {
       if (!doctorIdProvided) {
         const firstDoc = await client.query(
           `SELECT d.id FROM doctors d JOIN users u ON u.id = d.user_id
-           WHERE COALESCE(u.active, TRUE) = TRUE ORDER BY d.id LIMIT 1`
+           WHERE COALESCE(u.active, TRUE) = TRUE AND u.role='doctor'
+           ORDER BY d.id LIMIT 1`
         );
         if (firstDoc.rows.length) {
           doctorIdNum = firstDoc.rows[0].id;
@@ -106,6 +111,20 @@ exports.createAppointment = async (req, res) => {
           return res.status(400).json({ error: 'Doctor profile not found' });
         }
         doctorProfileId = doctorQ.rows[0].id;
+      }
+
+      // A deactivated doctor (or a profile whose user no longer has the doctor
+      // role) must not receive new bookings: nobody would ever see the visit.
+      // The default-doctor path already filters on active, so this closes the
+      // gap for an explicitly supplied doctor_id.
+      const availableQ = await client.query(
+        `SELECT 1 FROM doctors d JOIN users u ON u.id = d.user_id
+         WHERE d.id=$1 AND u.role='doctor' AND COALESCE(u.active, TRUE) = TRUE`,
+        [doctorProfileId]
+      );
+      if (!availableQ.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Selected doctor is not available for booking' });
       }
 
       // Concurrency-safe token allocation: serialize per doctor+day with a
@@ -163,10 +182,41 @@ exports.createAppointment = async (req, res) => {
         );
       }
 
+      // Durable reminder row (policy F) commits with the booking. A SAVEPOINT
+      // keeps a broken/missing reminder table from aborting a valid booking;
+      // scheduling is a no-op unless APPOINTMENT_REMINDER_OFFSET_MINUTES is set.
+      await client.query('SAVEPOINT reminder_schedule');
+      try {
+        const { scheduleReminder } = require('../utils/reminders');
+        await scheduleReminder(client, result.rows[0]);
+        await client.query('RELEASE SAVEPOINT reminder_schedule');
+      } catch (remErr) {
+        await client.query('ROLLBACK TO SAVEPOINT reminder_schedule');
+        console.error('Reminder scheduling failed:', remErr.message);
+      }
+
       await client.query('COMMIT');
+
+      // Release the connection before the provider call: notifications are
+      // network I/O and must not pin a pooled DB connection (a single-connection
+      // pool would otherwise time out waiting for itself).
+      releaseClient();
+
+      // Notify only after the booking is durably persisted. Best-effort: a
+      // provider outage must never fail or roll back a successful booking.
+      // Payload carries only the opaque appointment id.
+      try {
+        const { notifyAppointmentBooked } = require('../utils/push');
+        await notifyAppointmentBooked(result.rows[0]);
+      } catch (pushErr) {
+        console.error('Booking notification failed:', pushErr.message);
+      }
+
       return res.json({ message: 'Appointment booked', appointment: result.rows[0] });
     } catch (e) {
-      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+      if (!released) {
+        try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+      }
       // Retry only on token unique-violation races (requires UNIQUE(doctor_id, date, token)
       // constraint where present); otherwise fail.
       if (e && e.code === '23505' && attempt < MAX_ATTEMPTS) {
@@ -175,7 +225,7 @@ exports.createAppointment = async (req, res) => {
       console.error(e);
       return res.status(500).json({ error: 'Failed to book appointment' });
     } finally {
-      client.release();
+      releaseClient();
     }
   }
   return res.status(409).json({ error: 'Could not allocate token, please retry' });
@@ -241,10 +291,57 @@ exports.cancelMyAppointment = async (req, res) => {
     const patient_id = q.rows[0].id;
     const appQ = await pool.query('SELECT id, status FROM appointments WHERE id=$1 AND patient_id=$2', [appointmentId, patient_id]);
     if (!appQ.rows.length) return res.status(404).json({ error: 'Appointment not found' });
-    if (appQ.rows[0].status === 'done' || appQ.rows[0].status === 'completed' || appQ.rows[0].status === 'cancelled') {
+    const currentStatus = normalizeAppointmentStatus(appQ.rows[0].status);
+    if (currentStatus === 'done' || currentStatus === 'cancelled') {
       return res.status(400).json({ error: `Cannot cancel appointment with status '${appQ.rows[0].status}'` });
     }
-    await pool.query('UPDATE appointments SET status=$1 WHERE id=$2', ['cancelled', appointmentId]);
+    // Conditional write: the check above is only a friendly error. The status
+    // guard on the UPDATE itself is what makes it safe, so a doctor completing
+    // the visit between the read and the write cannot be overwritten by a
+    // stale patient cancel.
+    const upd = await pool.query(
+      `UPDATE appointments SET status='cancelled'
+        WHERE id=$1 AND patient_id=$2
+          AND status NOT IN ('cancelled','done','completed')
+        RETURNING id`,
+      [appointmentId, patient_id]
+    );
+    if (!upd.rows.length) {
+      return res.status(400).json({ error: 'Appointment is already closed and cannot be cancelled' });
+    }
+
+    // Only the request that actually changed the row reaches this point, so
+    // rejected, repeated, or race-losing cancellations never notify. The
+    // doctor is resolved through the appointment's doctor profile, admins
+    // through users.role; both are best-effort.
+    try {
+      const { notifyUser, notifyAdmins } = require('../utils/push');
+      const info = await pool.query(
+        `SELECT d.user_id AS doctor_user_id
+           FROM appointments a
+           LEFT JOIN doctors d ON d.id = a.doctor_id
+          WHERE a.id = $1`,
+        [appointmentId]
+      );
+      const doctorUserId = info.rows[0] ? info.rows[0].doctor_user_id : null;
+      const data = { appointmentId };
+      if (doctorUserId) {
+        await notifyUser(
+          doctorUserId,
+          'Appointment cancelled',
+          'A patient cancelled an appointment. Open the app to view your schedule.',
+          data
+        );
+      }
+      await notifyAdmins(
+        'Appointment cancelled',
+        'A patient cancelled an appointment. Open the app to view the schedule.',
+        data
+      );
+    } catch (pushErr) {
+      console.error('Cancellation notification failed:', pushErr.message);
+    }
+
     res.json({ message: 'Appointment cancelled' });
   } catch (e) {
     console.error(e);
@@ -269,7 +366,10 @@ exports.getForMe = async (req, res) => {
        LIMIT $2 OFFSET $3`,
       [doctor_id, limit, offset]
     );
-    res.json(apps.rows);
+    // Contact details are masked by default. The assigned doctor may request
+    // the originals (`?reveal=contact`) because this list is already scoped to
+    // their own appointments and calling the patient is a legitimate workflow.
+    res.json(shouldRevealContact(req, ['doctor']) ? apps.rows : maskPatientContacts(apps.rows));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to fetch appointments' });
@@ -284,7 +384,7 @@ exports.listDoctorsForPatients = async (req, res) => {
       `SELECT d.id AS doctor_id, u.name, d.specialty, d.phone, d.bio
        FROM doctors d
        INNER JOIN users u ON u.id = d.user_id
-       WHERE u.active = TRUE
+       WHERE COALESCE(u.active, TRUE) = TRUE AND u.role = 'doctor'
        ORDER BY u.name ASC`
     );
 

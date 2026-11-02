@@ -7,6 +7,21 @@ export function formatDate(value?: string | null): string {
 }
 
 /**
+ * Format a date-only value (`YYYY-MM-DD`) without timezone conversion.
+ * `new Date('2027-03-31')` is UTC midnight, which renders as 30 March in
+ * negative-offset timezones. Building the date from its parts keeps the
+ * calendar date the API sent.
+ */
+export function formatDateOnly(value?: string | null): string {
+  if (!value) return 'Date unavailable';
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+  if (!match) return formatDate(value);
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return 'Date unavailable';
+  return date.toLocaleDateString();
+}
+
+/**
  * Mask an Aadhaar number for display: "XXXX-XXXX-1234".
  * Returns an em dash placeholder when absent.
  */

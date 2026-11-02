@@ -54,6 +54,10 @@ exports.createPrescription = async (req, res) => {
   const cleanNotes = notes !== undefined && notes !== null ? String(notes).trim() || null : null;
 
   const client = await pool.connect();
+  let released = false;
+  const releaseClient = () => {
+    if (!released) { released = true; client.release(); }
+  };
   try {
     await client.query('BEGIN');
 
@@ -107,13 +111,35 @@ exports.createPrescription = async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    // Release before the provider call so a single-connection pool cannot
+    // deadlock against itself while the notification is in flight.
+    releaseClient();
+
+    // Notify the appointment's patient only after the prescription is
+    // persisted. The payload has no medication, diagnosis, or note content —
+    // just the opaque appointment id so the app can open the record.
+    try {
+      const { notifyAppointmentOwner } = require('../utils/push');
+      await notifyAppointmentOwner(
+        appointmentIdNum,
+        'Prescription ready',
+        'Your prescription is available in the app.',
+        { appointmentId: appointmentIdNum }
+      );
+    } catch (pushErr) {
+      console.error('Prescription notification failed:', pushErr.message);
+    }
+
     return res.json({ message: 'Prescription created', prescription_id: prescription.id });
   } catch (error) {
-    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    if (!released) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    }
     console.error(error);
     return res.status(500).json({ error: 'Failed to create prescription' });
   } finally {
-    client.release();
+    releaseClient();
   }
 };
 

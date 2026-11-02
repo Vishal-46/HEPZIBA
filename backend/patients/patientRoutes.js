@@ -8,8 +8,11 @@ const validate = require('../middleware/validate');
 
 // All endpoints here require a valid JWT
 router.get('/me', roleAuth('patient'), ctrl.getMe);
-router.post('/push-token', roleAuth('patient'), ctrl.savePushToken);
-router.post('/test-push', roleAuth('patient'), ctrl.testPush);
+// Push tokens belong to the authenticated account, whatever its role:
+// patients, doctors and admins all receive policy notifications.
+router.post('/push-token', roleAuth(['patient', 'doctor', 'admin']), ctrl.savePushToken);
+router.delete('/push-token', roleAuth(['patient', 'doctor', 'admin']), ctrl.removePushToken);
+router.post('/test-push', roleAuth(['patient', 'doctor', 'admin']), ctrl.testPush);
 router.put('/me', roleAuth('patient'), [
     body('address').optional().trim(),
     body('contact').optional().trim()

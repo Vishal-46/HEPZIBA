@@ -1,4 +1,6 @@
 const pool = require('../db');
+const { moneyToCents } = require('../utils/money');
+const { maskPatientContact, maskPatientContacts, shouldRevealContact } = require('../utils/pii');
 
 function parsePagination(req, defaultLimit = 20, maxLimit = 100) {
   let limit = Number(req.query.limit ?? defaultLimit);
@@ -7,15 +9,6 @@ function parsePagination(req, defaultLimit = 20, maxLimit = 100) {
   if (limit > maxLimit) limit = maxLimit;
   if (!Number.isInteger(offset) || offset < 0) offset = 0;
   return { limit, offset };
-}
-
-// Decimal-safe money parser: "19.99" -> 1999 cents. Returns NaN on invalid.
-function moneyToCents(value) {
-  if (value === null || value === undefined || value === '') return 0;
-  const s = String(value).trim();
-  if (!/^\d+(\.\d{1,2})?$/.test(s)) return NaN;
-  const [rs, ps = ''] = s.split('.');
-  return Number(rs) * 100 + Number((ps + '00').slice(0, 2));
 }
 
 exports.createInvoice = async (req, res) => {
@@ -96,6 +89,10 @@ exports.createInvoice = async (req, res) => {
     : null;
 
   const client = await pool.connect();
+  let released = false;
+  const releaseClient = () => {
+    if (!released) { released = true; client.release(); }
+  };
   try {
     await client.query('BEGIN');
 
@@ -119,19 +116,39 @@ exports.createInvoice = async (req, res) => {
     }
     patientIdNum = resolved;
     if (appointmentIdNum !== null) {
-      const appQ = await client.query('SELECT id FROM appointments WHERE id=$1', [appointmentIdNum]);
+      // The visit must belong to the same patient being billed, otherwise a
+      // typo/malicious id would link an invoice to another patient's visit.
+      const appQ = await client.query(
+        'SELECT id FROM appointments WHERE id=$1 AND patient_id=$2',
+        [appointmentIdNum, patientIdNum]
+      );
       if (!appQ.rows.length) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Appointment not found' });
+        return res.status(400).json({ error: 'Appointment not found for this patient' });
       }
     }
 
-    const invoiceQ = await client.query(
-      `INSERT INTO invoices (patient_id, appointment_id, doctor_name, doctor_fee, total_amount)
-       VALUES ($1,$2,$3,$4,$5)
-       RETURNING *`,
-      [patientIdNum, appointmentIdNum, cleanDoctorName, (doctorFeeCents / 100).toFixed(2), grandAmount]
+    // `doctor_fee` is added by migration 008. Fall back to the legacy invoice
+    // shape when that migration has not been applied yet, so billing keeps
+    // working during a rolling deploy.
+    const feeColQ = await client.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_name='invoices' AND column_name='doctor_fee'`
     );
+    const hasDoctorFee = feeColQ.rowCount > 0;
+    const invoiceQ = hasDoctorFee
+      ? await client.query(
+        `INSERT INTO invoices (patient_id, appointment_id, doctor_name, doctor_fee, total_amount)
+         VALUES ($1,$2,$3,$4,$5)
+         RETURNING *`,
+        [patientIdNum, appointmentIdNum, cleanDoctorName, (doctorFeeCents / 100).toFixed(2), grandAmount]
+      )
+      : await client.query(
+        `INSERT INTO invoices (patient_id, appointment_id, doctor_name, total_amount)
+         VALUES ($1,$2,$3,$4)
+         RETURNING *`,
+        [patientIdNum, appointmentIdNum, cleanDoctorName, grandAmount]
+      );
     const invoice = invoiceQ.rows[0];
 
     for (const item of cleanItems) {
@@ -156,24 +173,50 @@ exports.createInvoice = async (req, res) => {
     // the whole invoice so shelves never go negative silently.
     for (const item of cleanItems) {
       const invQ = await client.query(
-        'SELECT id, stock FROM inventory_items WHERE LOWER(name) = LOWER($1)',
+        'SELECT id FROM inventory_items WHERE LOWER(name) = LOWER($1) ORDER BY id LIMIT 1',
         [item.medicine_name]
       );
       if (!invQ.rows.length) continue;
-      const inv = invQ.rows[0];
-      if (inv.stock < item.quantity) {
+      const invId = invQ.rows[0].id;
+      // Atomic check-and-decrement: a separate read-then-write let two
+      // concurrent invoices both pass a stale stock check and drive the shelf
+      // negative. The `stock >= $1` guard makes the deduction all-or-nothing.
+      const dec = await client.query(
+        `UPDATE inventory_items
+            SET stock = stock - $1, updated_at = NOW()
+          WHERE id = $2 AND stock >= $1
+          RETURNING stock`,
+        [item.quantity, invId]
+      );
+      if (!dec.rows.length) {
+        const cur = await client.query('SELECT stock FROM inventory_items WHERE id=$1', [invId]);
+        const have = cur.rows.length ? cur.rows[0].stock : 0;
         await client.query('ROLLBACK');
         return res.status(400).json({
-          error: `Insufficient stock for ${item.medicine_name} — have ${inv.stock}, need ${item.quantity}. Restock first.`,
+          error: `Insufficient stock for ${item.medicine_name} — have ${have}, need ${item.quantity}. Restock first.`,
         });
       }
-      await client.query('UPDATE inventory_items SET stock = stock - $1, updated_at = NOW() WHERE id = $2', [
-        item.quantity,
-        inv.id,
-      ]);
     }
 
     await client.query('COMMIT');
+
+    // Release before the provider call so a single-connection pool cannot
+    // deadlock against itself while the notification is in flight.
+    releaseClient();
+
+    // Notify the invoice's patient only after it is persisted. No amounts,
+    // line items, or contact details are included in the payload.
+    try {
+      const { notifyInvoiceOwner } = require('../utils/push');
+      await notifyInvoiceOwner(
+        invoice.id,
+        'Invoice ready',
+        'A new invoice is available in the app.'
+      );
+    } catch (pushErr) {
+      console.error('Invoice notification failed:', pushErr.message);
+    }
+
     return res.json({
       message: 'Invoice created',
       invoice_id: invoice.id,
@@ -182,11 +225,13 @@ exports.createInvoice = async (req, res) => {
       total_amount: Number(grandAmount),
     });
   } catch (error) {
-    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    if (!released) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    }
     console.error(error);
     return res.status(500).json({ error: 'Failed to create invoice' });
   } finally {
-    client.release();
+    releaseClient();
   }
 };
 
@@ -221,7 +266,9 @@ exports.getMyInvoices = async (req, res) => {
       items: byInvoice.get(invoice.id) || [],
     }));
 
-    return res.json(result);
+    // A patient's own invoice list is always masked; only the owner can read
+    // it, and the UI never needs the stored full contact value here.
+    return res.json(maskPatientContacts(result));
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to fetch invoices' });
@@ -233,20 +280,45 @@ exports.getInvoiceById = async (req, res) => {
     const invoiceId = Number(req.params.id);
     if (!Number.isInteger(invoiceId)) return res.status(400).json({ error: 'Invalid invoice id' });
 
-    const invoiceQ = await pool.query('SELECT * FROM invoices WHERE id=$1', [invoiceId]);
+    const invoiceQ = await pool.query(
+      `SELECT inv.*,
+              p.patient_code,
+              p.age AS patient_age,
+              p.sex AS patient_sex,
+              p.mobile AS patient_mobile,
+              p.address AS patient_address,
+              p.aadhar_number AS patient_aadhar,
+              pu.name AS patient_name
+         FROM invoices inv
+         JOIN patients p ON p.id = inv.patient_id
+         LEFT JOIN users pu ON pu.id = p.user_id
+        WHERE inv.id = $1`,
+      [invoiceId]
+    );
     if (!invoiceQ.rows.length) return res.status(404).json({ error: 'Invoice not found' });
 
     const invoice = invoiceQ.rows[0];
-    // Ownership: patient owns invoice; admin bypass.
+    // Ownership: patient owns the invoice; admin bypass; a doctor must be
+    // assigned to the patient through an appointment.
     if (req.user.role === 'patient') {
       const patientQ = await pool.query('SELECT id FROM patients WHERE user_id=$1', [req.user.id]);
       if (!patientQ.rows.length || patientQ.rows[0].id !== invoice.patient_id) {
         return res.status(403).json({ error: 'Forbidden' });
       }
+    } else if (req.user.role === 'doctor') {
+      const docQ = await pool.query('SELECT id FROM doctors WHERE user_id=$1', [req.user.id]);
+      if (!docQ.rows.length) return res.status(403).json({ error: 'Forbidden' });
+      const assignedQ = await pool.query(
+        'SELECT 1 FROM appointments WHERE patient_id=$1 AND doctor_id=$2 LIMIT 1',
+        [invoice.patient_id, docQ.rows[0].id]
+      );
+      if (!assignedQ.rows.length) return res.status(403).json({ error: 'Forbidden' });
     }
 
     const itemsQ = await pool.query('SELECT * FROM invoice_items WHERE invoice_id=$1 ORDER BY id ASC', [invoiceId]);
-    return res.json({ ...invoice, items: itemsQ.rows });
+    const detail = { ...invoice, items: itemsQ.rows };
+    // Masked by default; admins may request originals for the printed bill.
+    return res.json(shouldRevealContact(req, ['admin']) ? detail : maskPatientContact(detail));
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to fetch invoice' });
@@ -279,12 +351,30 @@ exports.listInvoices = async (req, res) => {
 
     const q = req.query.q ? String(req.query.q).trim() : '';
 
-    let whereClause = '';
+    // Doctors may list invoices only for patients assigned to them. The
+    // assignment is the authoritative appointment relationship; a
+    // client-supplied patient_id/doctor_id is never used as proof.
+    let doctorId = null;
+    if (req.user.role === 'doctor') {
+      const docQ = await pool.query('SELECT id FROM doctors WHERE user_id=$1', [req.user.id]);
+      if (!docQ.rows.length) return res.status(403).json({ error: 'Forbidden' });
+      doctorId = docQ.rows[0].id;
+    }
+
+    const conds = [];
     const params = [];
     if (q) {
       params.push(`%${q}%`);
-      whereClause = `WHERE (pu.name ILIKE $1 OR p.patient_code ILIKE $1 OR inv.doctor_name ILIKE $1)`;
+      conds.push(`(pu.name ILIKE $${params.length} OR p.patient_code ILIKE $${params.length} OR inv.doctor_name ILIKE $${params.length})`);
     }
+    if (doctorId !== null) {
+      params.push(doctorId);
+      conds.push(`EXISTS (
+        SELECT 1 FROM appointments a
+        WHERE a.patient_id = p.id AND a.doctor_id = $${params.length}
+      )`);
+    }
+    const whereClause = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
     const query = `
       SELECT 
@@ -298,7 +388,10 @@ exports.listInvoices = async (req, res) => {
         pu.name AS patient_name
       FROM invoices inv
       JOIN patients p ON p.id = inv.patient_id
-      JOIN users pu ON pu.id = p.user_id
+      -- LEFT JOIN: a patient record can exist without a login account (legacy
+      -- imports, no user_id). An inner join silently dropped their invoices
+      -- from the admin billing list, so the money disappeared from the books.
+      LEFT JOIN users pu ON pu.id = p.user_id
       ${whereClause}
       ORDER BY inv.invoice_date DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
@@ -324,7 +417,9 @@ exports.listInvoices = async (req, res) => {
       items: byInvoice.get(invoice.id) || [],
     }));
 
-    return res.json(result);
+    // Contact columns are masked by default. Admins may request originals for
+    // the printed invoice (`?reveal=contact`); doctors always get masked.
+    return res.json(shouldRevealContact(req, ['admin']) ? result : maskPatientContacts(result));
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to fetch invoices' });

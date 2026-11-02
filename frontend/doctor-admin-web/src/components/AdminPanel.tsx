@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAdminData } from '../hooks/useAdminData';
-import type { Patient } from '../types';
+import type { Appointment, Patient } from '../types';
 import { formatDate } from '../utils/format';
+import { normalizeAppointmentStatus } from '../utils/status';
 import apiClient from '../utils/apiClient';
 import { printInvoice } from '../utils/invoicePrint';
 import AdminBookingModal from './AdminBookingModal';
@@ -67,7 +68,6 @@ export default function AdminPanel() {
   const knownIds = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (view !== 'queue') return;
-    setLastSync(new Date());
     let stopped = false;
     const quietCheck = async () => {
       if (document.hidden || stopped) return;
@@ -85,6 +85,9 @@ export default function AdminPanel() {
         // Silent: next tick retries.
       }
     };
+    // Sync once on open, then poll. State writes happen after the await, so
+    // they never cascade synchronously from the effect body.
+    void quietCheck();
     const id = setInterval(quietCheck, 10000);
     return () => {
       stopped = true;
@@ -96,19 +99,15 @@ export default function AdminPanel() {
     'Your request is accepted. Please be at the clinic 10 minutes before your scheduled time.';
 
   // Prefill the message box with the default accept text for pending visits.
-  useEffect(() => {
-    setMsgDrafts((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      for (const a of appointments) {
-        if (a.status === 'pending' && !(a.id in next)) {
-          next[a.id] = ACCEPT_DEFAULT;
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [appointments]);
+  // Derived at render time (not copied into state by an effect) so it stays in
+  // sync without cascading renders.
+  const messageFor = (appointment: Appointment) =>
+    msgDrafts[appointment.id] ??
+    (typeof appointment.notes === 'string' && appointment.notes
+      ? appointment.notes
+      : appointment.status === 'pending'
+        ? ACCEPT_DEFAULT
+        : '');
 
   const run = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -294,7 +293,7 @@ export default function AdminPanel() {
                         ) : null}
                       </div>
                       <span style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
-                        <span className={`pill status ${String(a.status || 'pending')}`}>{String(a.status || 'pending')}</span>
+                        <span className={`pill status ${normalizeAppointmentStatus(a.status)}`}>{normalizeAppointmentStatus(a.status)}</span>
                         {(() => {
                           const s = String(a.scheduled_at_effective ?? a.scheduled_at ?? '');
                           return s && new Date(s).toDateString() === todayStr ? (
@@ -309,14 +308,14 @@ export default function AdminPanel() {
                           <button className="acceptBtn" disabled={!!busy}
                             onClick={() => {
                               setNewIds((prev) => prev.filter((id) => id !== a.id));
-                              run(`accept-${a.id}`, () => updateAppointment(a.id, { status: 'confirmed', notes: msgDrafts[a.id] || undefined }));
+                              run(`accept-${a.id}`, () => updateAppointment(a.id, { status: 'confirmed', notes: messageFor(a) || undefined }));
                             }}>
                             Accept
                           </button>
                           <button className="declineBtn" disabled={!!busy}
                             onClick={() => {
                               setNewIds((prev) => prev.filter((id) => id !== a.id));
-                              run(`decline-${a.id}`, () => updateAppointment(a.id, { status: 'cancelled', notes: msgDrafts[a.id] || undefined }));
+                              run(`decline-${a.id}`, () => updateAppointment(a.id, { status: 'cancelled', notes: messageFor(a) || undefined }));
                             }}>
                             Decline
                           </button>
@@ -344,11 +343,11 @@ export default function AdminPanel() {
                       )}
                     </div>
                     <textarea className="msgBox" rows={2} placeholder="Message to patient (saved as visit note, visible in their app)…"
-                      value={msgDrafts[a.id] ?? (typeof a.notes === 'string' ? a.notes : '')}
+                      value={messageFor(a)}
                       onChange={(e) => setMsgDrafts((p) => ({ ...p, [a.id]: e.target.value }))} aria-label={`Message for appointment ${a.id}`} />
                     <div className="queueActions">
                       <button className="ghostBtn" disabled={!!busy}
-                        onClick={() => run(`msg-${a.id}`, () => updateAppointment(a.id, { notes: msgDrafts[a.id] ?? '' }))}>
+                        onClick={() => run(`msg-${a.id}`, () => updateAppointment(a.id, { notes: messageFor(a) }))}>
                         {busy === `msg-${a.id}` ? 'Sending…' : 'Send message'}
                       </button>
                     </div>
@@ -588,7 +587,7 @@ export default function AdminPanel() {
                 <select className="proSelect" value={billApptId} onChange={(e) => setBillApptId(e.target.value)} aria-label="Appointment">
                   <option value="">Walk-in / no visit</option>
                   {patientAppts.map((a) => (
-                    <option key={a.id} value={a.id}>#{a.id} · {formatDate(String(a.scheduled_at_effective ?? a.scheduled_at ?? ''))} · {String(a.status)}</option>
+                    <option key={a.id} value={a.id}>#{a.id} · {formatDate(String(a.scheduled_at_effective ?? a.scheduled_at ?? ''))} · {normalizeAppointmentStatus(a.status)}</option>
                   ))}
                 </select>
               </label>
@@ -709,7 +708,7 @@ export default function AdminPanel() {
                       </button>
                       <button className="ghostBtn" disabled={!!busy}
                         onClick={() => run(`print-${v.id}`, async () => {
-                          const res = await apiClient.get(`/billing/invoices/${v.id}`);
+                          const res = await apiClient.get(`/billing/invoices/${v.id}?reveal=contact`);
                           printInvoice(res.data);
                         })}>
                         {busy === `print-${v.id}` ? '…' : 'Print'}

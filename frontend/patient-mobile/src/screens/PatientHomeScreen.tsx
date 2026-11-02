@@ -32,7 +32,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { createStackNavigator } from '@react-navigation/stack';
 import PrescriptionDetailScreen from './PrescriptionDetailScreen';
 import InvoiceDetailScreen from './InvoiceDetailScreen';
-import { apiGet as apiGetShared, apiPost, apiPut, ApiError } from '../utils/apiClient';
+import { apiGet, apiPost, apiPut, ApiError, isNetworkError } from '../utils/apiClient';
 import type { User } from '../utils/sessionTypes';
 
 type Appointment = {
@@ -73,10 +73,14 @@ type Prescription = {
 };
 type Invoice = { id: number; invoice_date?: string; total_amount?: number; status?: string };
 
-type Props = { token: string; user: User; onLogout: () => void };
+type Props = { user: User; onLogout: () => void };
 type TabKey = 'home' | 'book' | 'records' | 'profile' | 'clinic';
 
 const PRIORITY_OPTIONS = ['normal', 'urgent'];
+
+// Notification identifiers already handled in this app process, so a cold-start
+// launch response and the live tap listener cannot open the same record twice.
+const handledNotificationIds = new Set<string>();
 
 // Generous touch target so the whole button answers, not just its label.
 const HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 } as const;
@@ -136,7 +140,7 @@ export default function PatientHomeScreen(props: Props) {
   );
 }
 
-function PatientHomeScreenContent({ token, user, onLogout }: Props) {
+function PatientHomeScreenContent({ user, onLogout }: Props) {
   const navigation = useNavigation<any>();
   const topInset = Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
   const [tab, setTab] = useState<TabKey>('home');
@@ -145,6 +149,10 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
   const [profile, setProfile] = useState<PatientProfile | null>(null);
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  // Appointment referenced by the last tapped notification, highlighted in the
+  // Records tab. Only ever set after the server's owner-scoped list confirms
+  // the id belongs to this patient.
+  const [highlightAppointmentId, setHighlightAppointmentId] = useState<number | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState('');
@@ -191,22 +199,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
   });
   const [photoUploading, setPhotoUploading] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
-  const apiGet = useCallback(
-    async (path: string) => {
-      // Route through the shared API client so silent refresh + single retry +
-      // global logout apply on 401. Network-level failures surface as
-      // 'NETWORK_OFFLINE' so the offline banner logic keeps working.
-      try {
-        return await apiGetShared<any>(path);
-      } catch (error) {
-        if (error instanceof ApiError) {
-          throw new Error(apiErrorMessage(error.payload, 'Request failed'));
-        }
-        throw new Error('NETWORK_OFFLINE');
-      }
-    },
-    [],
-  );
+
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -217,13 +210,13 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       const [apps, docs, me, rx, bills] = await Promise.allSettled([
         apiGet('/appointments/my'),
         apiGet('/appointments/catalog/doctors'),
-        apiGet('/patients/me'),
+        apiGet('/patients/me?reveal=contact'),
         apiGet('/prescriptions/my'),
         apiGet('/billing/my'),
       ]);
 
       const offlineHits = [apps, docs, me, rx, bills].filter(
-        (r) => r.status === 'rejected' && String((r as any).reason?.message) === 'NETWORK_OFFLINE',
+        (r) => r.status === 'rejected' && isNetworkError(r.reason),
       ).length;
       if (offlineHits >= 3) {
         setIsOffline(true);
@@ -261,12 +254,11 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load data';
-      if (message === 'NETWORK_OFFLINE') {
+      if (isNetworkError(error)) {
         setIsOffline(true);
         setErrorText('You appear to be offline. Pull to retry when connected.');
       } else {
-        setErrorText(message);
+        setErrorText(error instanceof Error ? error.message : 'Failed to load data');
       }
     } finally {
       setLoading(false);
@@ -287,7 +279,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       try {
         const mod = await import('../utils/pushRegistration');
         if (cancelled) return;
-        const regRes = await mod.registerPushToken(token);
+        const regRes = await mod.registerPushToken();
         if (!cancelled && regRes) {
           setPushStatus({
             granted: regRes.success,
@@ -315,10 +307,51 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
             .catch(() => {});
         });
         if (cancelled) return;
-        respondSub = await mod.addNotificationResponseReceivedListener(() => {
-          setTab('home');
-          void loadAll();
+
+        // A tap must open the record it refers to. The referenced id is only
+        // trusted after the owner-scoped list confirms it belongs to this
+        // patient: a stale or foreign id simply highlights nothing.
+        const openFromResponse = async (response: any) => {
+          // The launch response and the live listener can both report the same
+          // tap; process each notification once per app process.
+          const notifId = response?.notification?.request?.identifier;
+          if (notifId) {
+            if (handledNotificationIds.has(notifId)) return;
+            handledNotificationIds.add(notifId);
+          }
+          const data = response?.notification?.request?.content?.data;
+          const rawId = data?.appointmentId;
+          const id = Number(rawId);
+          setTab('records');
+          try {
+            const [apps, bills] = await Promise.all([
+              apiGet('/appointments/my'),
+              apiGet('/billing/my'),
+            ]);
+            if (Array.isArray(apps)) setAppointments(apps);
+            if (Array.isArray(bills)) setInvoices(bills);
+            const owned = Number.isInteger(id) && id > 0 && Array.isArray(apps)
+              && apps.some((a: Appointment) => a.id === id);
+            setHighlightAppointmentId(owned ? id : null);
+            setInfoText(owned
+              ? 'Showing the visit this notification is about.'
+              : 'Showing your latest visits.');
+          } catch {
+            setHighlightAppointmentId(null);
+            setInfoText('Could not load the referenced visit. Pull to refresh.');
+          }
+        };
+
+        respondSub = await mod.addNotificationResponseReceivedListener((response) => {
+          void openFromResponse(response);
         });
+
+        // Cold start: a tap that launched the app is not delivered to the
+        // listener above, so read the launch response explicitly.
+        if (!cancelled) {
+          const initial = await mod.getInitialNotificationResponse();
+          if (initial && !cancelled) await openFromResponse(initial);
+        }
       } catch {
         // Push unavailable (web/simulator): polling below still applies.
       }
@@ -328,7 +361,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       notifySub?.remove();
       respondSub?.remove();
     };
-  }, [token, apiGet, loadAll]);
+  }, [apiGet, loadAll]);
 
   // Auto-refresh permission and token when user returns to app (e.g. from phone Settings)
   useEffect(() => {
@@ -337,7 +370,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       if (nextState === 'active') {
         try {
           const mod = await import('../utils/pushRegistration');
-          const regRes = await mod.registerPushToken(token);
+          const regRes = await mod.registerPushToken();
           if (regRes) {
             setPushStatus({
               granted: regRes.success,
@@ -351,7 +384,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       }
     });
     return () => sub.remove();
-  }, [token]);
+  }, []);
 
   // Live status: re-check visit decisions by itself every 30s so an admin
   // Accept/Decline flips pending → approved without manual refresh.
@@ -517,6 +550,8 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
       // only when already known.
       const doctorId = selectedDoctorId ?? doctors[0]?.doctor_id ?? null;
 
+      // Shared client handles token refresh + 401 logout, so an expired
+      // access token no longer forces the patient to sign in again.
       await apiPost('/appointments/', {
         ...(doctorId ? { doctor_id: doctorId } : {}),
         scheduled_at: appointmentDate.toISOString(),
@@ -713,7 +748,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
               setTestingPush(true);
               try {
                 const mod = await import('../utils/pushRegistration');
-                const regRes = await mod.registerPushToken(token);
+                const regRes = await mod.registerPushToken();
                 setPushStatus({
                   granted: regRes.success,
                   status: regRes.permissionStatus,
@@ -898,6 +933,48 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
         {tab === 'book' && (
           <Card style={s.card}>
             <Card.Content>
+              <Text style={s.cardTitle}>Choose Doctor</Text>
+              {doctors.length === 0 ? (
+                <Text style={[s.cardMeta, { marginBottom: SPACING.m }]}>Loading available doctors...</Text>
+              ) : (
+                <View style={{ marginBottom: SPACING.m }}>
+                  {doctors.map((doc) => {
+                    const isSelected = selectedDoctorId === doc.doctor_id;
+                    return (
+                      <TouchableOpacity
+                        key={doc.doctor_id}
+                        onPress={() => setSelectedDoctorId(doc.doctor_id)}
+                        style={[
+                          s.doctorSelectCard,
+                          isSelected && s.doctorSelectCardActive,
+                        ]}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: isSelected }}
+                      >
+                        <View style={[s.doctorSelectIconWrap, isSelected && { backgroundColor: 'rgba(255,255,255,0.2)' }]}>
+                          <Ionicons
+                            name="medkit-outline"
+                            size={20}
+                            color={isSelected ? COLOR.surface : COLOR.primary}
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[s.doctorSelectName, isSelected && s.doctorSelectTextActive]}>
+                            {doc.name}
+                          </Text>
+                          <Text style={[s.doctorSelectMeta, isSelected && s.doctorSelectMetaActive]}>
+                            {doc.specialty || 'General Practitioner'}
+                          </Text>
+                        </View>
+                        {isSelected && (
+                          <Ionicons name="checkmark-circle" size={22} color={COLOR.surface} />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+
               <Text style={s.cardTitle}>Pick a Date & Time</Text>
 
               <View style={s.datetimeRow}>
@@ -1011,7 +1088,13 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
             <SectionCard title="Appointments">
               {appointments.length ? (
                 appointments.map((app) => (
-                  <Card key={app.id} style={{ marginBottom: SPACING.s }}>
+                  <Card
+                    key={app.id}
+                    style={[
+                      { marginBottom: SPACING.s },
+                      highlightAppointmentId === app.id ? s.highlightCard : null,
+                    ]}
+                  >
                     <Card.Content>
                       <Text style={s.rowTitle}>{formatDate(app)}</Text>
                       <Text style={s.rowMeta}>Doctor: {app.doctor_name || '-'}</Text>
@@ -1218,7 +1301,7 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                     onPress={async () => {
                       try {
                         const mod = await import('../utils/pushRegistration');
-                        const r = await mod.registerPushToken(token);
+                        const r = await mod.registerPushToken();
                         setPushStatus((prev) => ({
                           ...prev,
                           granted: r.success,
@@ -1239,11 +1322,81 @@ function PatientHomeScreenContent({ token, user, onLogout }: Props) {
                 )}
               </View>
 
-              {!pushStatus.granted && (
+              {!pushStatus.granted ? (
                 <Text style={s.notifHelpText}>
                   Turn on notifications to get alerts when your appointment is accepted or updated.
                 </Text>
+              ) : (
+                <Text style={s.notifHelpText}>
+                  Receive alerts when your appointment is accepted, updated, or when prescriptions and bills are ready.
+                </Text>
               )}
+
+              {pushStatus.token ? (
+                <Text style={{ color: COLOR.accent, fontSize: 11, marginBottom: 8 }} numberOfLines={1}>
+                  Device token: {pushStatus.token.slice(0, 28)}...
+                </Text>
+              ) : null}
+
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <Button
+                  mode="outlined"
+                  loading={testingPush}
+                  disabled={testingPush}
+                  icon="refresh"
+                  onPress={async () => {
+                    setTestingPush(true);
+                    try {
+                      const mod = await import('../utils/pushRegistration');
+                      const r = await mod.registerPushToken();
+                      setPushStatus({
+                        granted: r.success,
+                        status: r.permissionStatus,
+                        token: r.token,
+                        checked: true,
+                        errorMessage: r.errorMessage,
+                      });
+                      if (r.success) setInfoText('Push notifications registered successfully!');
+                      else setErrorText(r.errorMessage || 'Registration failed');
+                    } catch (e: any) {
+                      setErrorText(e?.message || 'Error registering');
+                    } finally {
+                      setTestingPush(false);
+                    }
+                  }}
+                  style={[s.testPushBtn, { flex: 1 }]}
+                >
+                  Register
+                </Button>
+                <Button
+                  mode="contained"
+                  loading={testingPush}
+                  disabled={testingPush}
+                  icon="bell-outline"
+                  onPress={async () => {
+                    setTestingPush(true);
+                    try {
+                      const mod = await import('../utils/pushRegistration');
+                      await mod.sendLocalTestNotification();
+                      const srv = await mod.testServerPush();
+                      if (srv.success) {
+                        setInfoText('Test push sent! Check your notification bar.');
+                      } else {
+                        setErrorText(`Push test note: ${srv.message}`);
+                      }
+                    } catch (e: any) {
+                      setErrorText(`Push test error: ${e?.message}`);
+                    } finally {
+                      setTestingPush(false);
+                    }
+                  }}
+                  style={[s.primaryBtn, { flex: 1 }]}
+                  contentStyle={s.btnContent}
+                  labelStyle={s.primaryBtnText}
+                >
+                  Test Push
+                </Button>
+              </View>
             </Card.Content>
           </Card>
         </>
@@ -1504,16 +1657,6 @@ function formatDate(app: Appointment): string {
   return d ? d.toLocaleString() : 'Date unavailable';
 }
 
-/** Surface express-validator `errors[]`, `{error}`, or `{message}` as readable text. */
-function apiErrorMessage(payload: any, fallback: string): string {
-  if (!payload) return fallback;
-  if (typeof payload.error === 'string' && payload.error.trim()) return payload.error;
-  if (typeof payload.message === 'string' && payload.message.trim()) return payload.message;
-  const first = Array.isArray(payload.errors) ? payload.errors[0] : null;
-  const msg = first?.msg ?? first?.message;
-  if (typeof msg === 'string' && msg.trim()) return msg;
-  return fallback;
-}
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLOR.background },
@@ -1681,6 +1824,8 @@ const s = StyleSheet.create({
   doctorChipMeta: { color: COLOR.primary, fontFamily: FONT.regular, fontSize: 13, marginTop: SPACING.xs },
   rowTitle: { color: COLOR.text, fontFamily: FONT.medium, fontSize: 15 },
   rowMeta: { color: COLOR.primary, fontFamily: FONT.regular, fontSize: 13, marginTop: SPACING.xs },
+  // Marks the appointment a tapped notification referred to.
+  highlightCard: { borderWidth: 2, borderColor: COLOR.accent },
   photoRow: { flexDirection: 'row', gap: SPACING.m, alignItems: 'center', marginBottom: SPACING.m },
   photoBtnWrap: { flex: 1, justifyContent: 'center' },
   photoBtn: {
@@ -1765,6 +1910,46 @@ const s = StyleSheet.create({
   notifStatusText: { fontFamily: FONT.medium, fontSize: 13, marginLeft: SPACING.xs },
   notifHelpText: { color: COLOR.accent, fontFamily: FONT.regular, fontSize: 12, marginBottom: SPACING.m },
   testPushBtn: { borderColor: COLOR.primary, borderRadius: RADIUS.md },
+  doctorSelectCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: SPACING.m,
+    borderRadius: RADIUS.md,
+    borderWidth: 1.5,
+    borderColor: '#e2e8f0',
+    backgroundColor: COLOR.surface,
+    marginBottom: SPACING.s,
+    gap: SPACING.s,
+  },
+  doctorSelectCardActive: {
+    backgroundColor: COLOR.primary,
+    borderColor: COLOR.primary,
+  },
+  doctorSelectIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  doctorSelectName: {
+    fontFamily: FONT.bold,
+    fontSize: 15,
+    color: COLOR.text,
+  },
+  doctorSelectMeta: {
+    fontFamily: FONT.regular,
+    fontSize: 12,
+    color: COLOR.primary,
+    marginTop: 2,
+  },
+  doctorSelectTextActive: {
+    color: COLOR.surface,
+  },
+  doctorSelectMetaActive: {
+    color: '#cbd5e1',
+  },
   footer: { alignItems: 'center', marginTop: SPACING.m, marginBottom: SPACING.xs },
   footerText: { color: COLOR.text, opacity: 0.55, fontFamily: FONT.regular, fontSize: 11, letterSpacing: 0.2 },
 });

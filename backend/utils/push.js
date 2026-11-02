@@ -10,14 +10,31 @@ function isExpoPushToken(token) {
   );
 }
 
+// Device tokens belong to a user account, not to a patient record.
+//
+// `patient_push_tokens.user_id` references `users(id)` (008 + 009). Earlier
+// versions of this helper also matched the value against `patients.id` and
+// `patients.user_id`, which is a cross-account leak: `users.id` and
+// `patients.id` are independent sequences, so a walk-in patient (no user
+// account) or a deleted account shifts them apart and a patient id collides
+// with an unrelated user id. That delivered one patient's appointment
+// notification to another patient's phone. Recipient selection must be an
+// exact users.id match.
+//
+// Inactive rows are skipped so a token revoked on logout/account switch (or
+// reported as DeviceNotRegistered) never receives another user's message.
+// A missing column (pre-009 schema) makes this fail closed: no send rather
+// than a broadcast to the wrong devices.
 async function tokensForUser(userId) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id < 1) return [];
   try {
     const r = await pool.query(
       `SELECT DISTINCT token FROM patient_push_tokens
        WHERE user_id = $1
-          OR user_id IN (SELECT id FROM patients WHERE user_id = $1)
-          OR user_id IN (SELECT user_id FROM patients WHERE id = $1)`,
-      [userId]
+         AND is_active IS TRUE
+         AND token IS NOT NULL`,
+      [id]
     );
     return r.rows.map((x) => x.token).filter(Boolean);
   } catch (e) {
@@ -62,7 +79,7 @@ async function sendPush(tokens, title, body, data = {}) {
       if (payload && Array.isArray(payload.data)) {
         payload.data.forEach((ticket, idx) => {
           if (ticket.status === 'error') {
-            console.error(`push ticket error for token ${tokenList[idx]}:`, ticket.message, ticket.details);
+            console.error('push ticket error:', ticket.message, ticket.details);
             if (ticket.details && ticket.details.error === 'DeviceNotRegistered') {
               pool.query('DELETE FROM patient_push_tokens WHERE token=$1', [tokenList[idx]]).catch(() => {});
             }
@@ -78,34 +95,166 @@ async function sendPush(tokens, title, body, data = {}) {
 }
 
 // Notify the patient that owns an appointment.
-async function notifyAppointmentOwner(appointmentId, title, body) {
+//
+// The owner is resolved only through `appointments.patient_id -> patients.id ->
+// patients.user_id`. There is no fallback to `appointments.patient_id` as a
+// user id: that value is a patients.id and can equal an unrelated users.id,
+// which would send the notification to a different patient.
+async function notifyAppointmentOwner(appointmentId, title, body, data = {}) {
+  const id = Number(appointmentId);
+  if (!Number.isInteger(id) || id < 1) {
+    return { ok: false, reason: 'Invalid appointment id', appointmentId };
+  }
   try {
-    console.log(`push: lookup owner for appointment ${appointmentId}...`);
     const r = await pool.query(
-      `SELECT COALESCE(p.user_id, p_by_user.user_id, a.patient_id) AS user_id
+      `SELECT p.user_id AS user_id
        FROM appointments a
-       LEFT JOIN patients p ON p.id = a.patient_id
-       LEFT JOIN patients p_by_user ON p_by_user.user_id = a.patient_id
+       JOIN patients p ON p.id = a.patient_id
        WHERE a.id = $1`,
-      [appointmentId]
+      [id]
     );
     if (!r.rows.length || !r.rows[0].user_id) {
-      console.log('push: no patient user found for appointment', appointmentId);
-      return { ok: false, reason: 'Appointment owner not found', appointmentId };
+      console.log('push: no patient user found for appointment', id);
+      return { ok: false, reason: 'Appointment owner not found', appointmentId: id };
     }
     const userId = r.rows[0].user_id;
     const tokens = await tokensForUser(userId);
     if (!tokens.length) {
       console.log('push: no push tokens found for user', userId);
-      return { ok: false, reason: 'No push tokens found for user', userId, appointmentId };
+      return { ok: false, reason: 'No push tokens found for user', userId, appointmentId: id };
     }
-    console.log(`push: sending notification to user ${userId} (${tokens.length} token(s)). Title: "${title}"`);
-    const sendRes = await sendPush(tokens, title, body, { appointmentId });
+    // Payload carries only the opaque appointment id; the app fetches the
+    // record after its own authorization check.
+    const sendRes = await sendPush(tokens, title, body, { appointmentId: id, ...data });
     return { ok: true, userId, tokens, sendResult: sendRes };
   } catch (e) {
     console.error('notify failed:', e.message);
-    return { ok: false, error: e.message, appointmentId };
+    return { ok: false, error: e.message, appointmentId: id };
   }
 }
 
-module.exports = { tokensForUser, sendPush, notifyAppointmentOwner, isExpoPushToken };
+// Notify a single account (patient, doctor or admin). Recipient selection is
+// the same exact users.id match as tokensForUser, so a caller can never widen
+// it with a client-supplied id.
+async function notifyUser(userId, title, body, data = {}) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id < 1) {
+    return { ok: false, reason: 'Invalid user id', userId };
+  }
+  const tokens = await tokensForUser(id);
+  if (!tokens.length) {
+    console.log('push: no push tokens found for user', id);
+    return { ok: false, reason: 'No push tokens found for user', userId: id };
+  }
+  const sendResult = await sendPush(tokens, title, body, data);
+  return { ok: true, userId: id, tokens, sendResult };
+}
+
+// Notify every active admin account that has a registered device. Admins are
+// resolved from the users table (role + active), never from a request field.
+async function tokensForAdmins() {
+  try {
+    const r = await pool.query(
+      `SELECT DISTINCT t.token
+         FROM patient_push_tokens t
+         JOIN users u ON u.id = t.user_id
+        WHERE u.role = 'admin'
+          AND COALESCE(u.active, TRUE) = TRUE
+          AND t.is_active IS TRUE
+          AND t.token IS NOT NULL`
+    );
+    return r.rows.map((x) => x.token).filter(Boolean);
+  } catch (e) {
+    console.error('push tokensForAdmins error:', e.message);
+    return [];
+  }
+}
+
+async function notifyAdmins(title, body, data = {}) {
+  const tokens = await tokensForAdmins();
+  if (!tokens.length) {
+    console.log('push: no admin devices registered');
+    return { ok: false, reason: 'No admin push tokens found', tokens: [] };
+  }
+  const sendResult = await sendPush(tokens, title, body, data);
+  return { ok: true, tokens, sendResult };
+}
+
+// Booking: notify the patient who owns the new appointment and the assigned
+// doctor. Both sides are resolved from persisted relationships. The payload
+// carries only the opaque appointment id (no name, contact, or clinical data).
+async function notifyAppointmentBooked(appointment) {
+  const appointmentId = Number(appointment && appointment.id);
+  if (!Number.isInteger(appointmentId) || appointmentId < 1) {
+    return { ok: false, reason: 'Invalid appointment id' };
+  }
+  const data = { appointmentId };
+  const results = { patient: null, doctor: null };
+  try {
+    const pQ = await pool.query('SELECT user_id FROM patients WHERE id=$1', [appointment.patient_id]);
+    const patientUserId = pQ.rows[0] ? pQ.rows[0].user_id : null;
+    if (patientUserId) {
+      results.patient = await notifyUser(
+        patientUserId,
+        'Appointment booked',
+        'Your appointment has been booked. Open the app to view the details.',
+        data
+      );
+    }
+  } catch (e) {
+    results.patient = { ok: false, error: e.message };
+  }
+  try {
+    const dQ = await pool.query('SELECT user_id FROM doctors WHERE id=$1', [appointment.doctor_id]);
+    const doctorUserId = dQ.rows[0] ? dQ.rows[0].user_id : null;
+    if (doctorUserId) {
+      results.doctor = await notifyUser(
+        doctorUserId,
+        'New appointment',
+        'A new appointment was booked. Open the app to view your schedule.',
+        data
+      );
+    }
+  } catch (e) {
+    results.doctor = { ok: false, error: e.message };
+  }
+  return results;
+}
+
+// Invoice: notify the patient the invoice actually belongs to (resolved
+// through invoices.patient_id -> patients.user_id). No amounts or line items.
+async function notifyInvoiceOwner(invoiceId, title, body, data = {}) {
+  const id = Number(invoiceId);
+  if (!Number.isInteger(id) || id < 1) {
+    return { ok: false, reason: 'Invalid invoice id', invoiceId };
+  }
+  try {
+    const r = await pool.query(
+      `SELECT p.user_id AS user_id
+         FROM invoices inv
+         JOIN patients p ON p.id = inv.patient_id
+        WHERE inv.id = $1`,
+      [id]
+    );
+    if (!r.rows.length || !r.rows[0].user_id) {
+      console.log('push: no patient user found for invoice', id);
+      return { ok: false, reason: 'Invoice owner not found', invoiceId: id };
+    }
+    return notifyUser(r.rows[0].user_id, title, body, { invoiceId: id, ...data });
+  } catch (e) {
+    console.error('invoice notify failed:', e.message);
+    return { ok: false, error: e.message, invoiceId: id };
+  }
+}
+
+module.exports = {
+  tokensForUser,
+  tokensForAdmins,
+  sendPush,
+  notifyUser,
+  notifyAdmins,
+  notifyAppointmentOwner,
+  notifyAppointmentBooked,
+  notifyInvoiceOwner,
+  isExpoPushToken,
+};

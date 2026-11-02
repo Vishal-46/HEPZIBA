@@ -48,7 +48,17 @@ export default function App() {
 
   const handleLogout = useCallback(async () => {
     const stale = sessionRef.current;
-    // Server-side logout first (best effort): revokes the refresh token and
+    // Deactivate this device's push registration first (best effort) so the
+    // next account on this phone cannot receive this user's notifications.
+    if (stale) {
+      try {
+        const push = await import('./src/utils/pushRegistration');
+        await push.unregisterPushToken();
+      } catch {
+        // Offline logout still clears the local session below.
+      }
+    }
+    // Server-side logout (best effort): revokes the refresh token and
     // denylists the access jti so the JWT dies now, not at expiry.
     if (stale?.token || stale?.refreshToken) {
       try {
@@ -198,7 +208,6 @@ export default function App() {
           <StatusBar style="dark" />
           {session ? (
             <PatientHomeScreen
-              token={session.token}
               user={session.user}
               onLogout={() => void handleLogout()}
             />

@@ -40,9 +40,11 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (initialPatient) {
-      setSelectedPatient(initialPatient);
-    }
+    if (!initialPatient) return;
+    // Deferred so the sync from props does not cascade a render inside the
+    // effect body (react-hooks/set-state-in-effect).
+    const timer = setTimeout(() => setSelectedPatient(initialPatient), 0);
+    return () => clearTimeout(timer);
   }, [initialPatient]);
 
   const loadInvoices = async () => {
@@ -59,7 +61,10 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
   };
 
   useEffect(() => {
-    loadInvoices();
+    const timer = setTimeout(() => {
+      void loadInvoices();
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   // Search patients for billing
@@ -70,7 +75,7 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
       return;
     }
     try {
-      const res = await apiClient.get<Patient[]>('/patients', { params: { q } });
+      const res = await apiClient.get<Patient[]>('/patients', { params: { q, reveal: 'contact' } });
       setPatientResults(Array.isArray(res.data) ? res.data : []);
     } catch {
       setPatientResults([]);
@@ -444,7 +449,18 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
                         <button
                           className="primaryBtn"
                           style={{ padding: '4px 10px', fontSize: '12px' }}
-                          onClick={() => printInvoice(inv)}
+                          onClick={async () => {
+                            // The list response is masked; the printed bill needs
+                            // the original mobile via the admin-only exception.
+                            try {
+                              const res = await apiClient.get<Invoice>(`/billing/invoices/${inv.id}`, {
+                                params: { reveal: 'contact' },
+                              });
+                              printInvoice(res.data);
+                            } catch (err) {
+                              setError(apiErrorMessage(err, 'Failed to load invoice'));
+                            }
+                          }}
                         >
                           Print Bill
                         </button>

@@ -15,18 +15,46 @@ export function useAdminData() {
     setLoading(true);
     setError('');
     try {
-      const [u, p, a, i, inv] = await Promise.all([
+      // Load each panel independently: one failing endpoint must not blank the
+      // whole admin dashboard or discard data that did load successfully.
+      const [u, p, a, i, inv] = await Promise.allSettled([
         apiClient.get<AdminUser[]>('/admin/users?limit=200'),
-        apiClient.get<PatientRow[]>('/admin/patients?limit=200'),
-        apiClient.get<Appointment[]>('/admin/appointments?limit=100'),
+        apiClient.get<PatientRow[]>('/admin/patients?limit=200&reveal=contact'),
+        apiClient.get<Appointment[]>('/admin/appointments?limit=100&reveal=contact'),
         apiClient.get<InventoryItem[]>('/inventory?limit=100'),
         apiClient.get<InvoiceRow[]>('/billing/invoices?limit=50'),
       ]);
-      setUsers(Array.isArray(u.data) ? u.data : []);
-      setPatients(Array.isArray(p.data) ? p.data : []);
-      setAppointments(Array.isArray(a.data) ? a.data : []);
-      setInventory(Array.isArray(i.data) ? i.data : []);
-      setInvoices(Array.isArray(inv.data) ? inv.data : []);
+
+      const failures: string[] = [];
+      if (u.status === 'fulfilled') {
+        setUsers(Array.isArray(u.value.data) ? u.value.data : []);
+      } else {
+        failures.push(`Users — ${apiErrorMessage(u.reason, 'failed to load')}`);
+      }
+      if (p.status === 'fulfilled') {
+        setPatients(Array.isArray(p.value.data) ? p.value.data : []);
+      } else {
+        failures.push(`Patients — ${apiErrorMessage(p.reason, 'failed to load')}`);
+      }
+      if (a.status === 'fulfilled') {
+        setAppointments(Array.isArray(a.value.data) ? a.value.data : []);
+      } else {
+        failures.push(`Appointments — ${apiErrorMessage(a.reason, 'failed to load')}`);
+      }
+      if (i.status === 'fulfilled') {
+        setInventory(Array.isArray(i.value.data) ? i.value.data : []);
+      } else {
+        failures.push(`Inventory — ${apiErrorMessage(i.reason, 'failed to load')}`);
+      }
+      if (inv.status === 'fulfilled') {
+        setInvoices(Array.isArray(inv.value.data) ? inv.value.data : []);
+      } else {
+        failures.push(`Invoices — ${apiErrorMessage(inv.reason, 'failed to load')}`);
+      }
+
+      if (failures.length > 0) {
+        setError(`Some data could not be loaded. ${failures.join(' · ')}`);
+      }
     } catch (err) {
       setError(apiErrorMessage(err, 'Failed to load admin data'));
     } finally {
@@ -134,7 +162,7 @@ export function useAdminData() {
   // spinner, so background polling never flashes the dashboard.
   // Returns the fresh list for change detection.
   const refreshAppointmentsQuiet = useCallback(async () => {
-    const res = await apiClient.get<Appointment[]>('/admin/appointments?limit=100');
+    const res = await apiClient.get<Appointment[]>('/admin/appointments?limit=100&reveal=contact');
     const fresh = Array.isArray(res.data) ? res.data : [];
     setAppointments(fresh);
     return fresh;

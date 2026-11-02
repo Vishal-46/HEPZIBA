@@ -1,5 +1,6 @@
 import { Platform, Linking } from 'react-native';
-import { API_BASE_URL } from '../config/api';
+import { apiPost, apiRequest } from './apiClient';
+import { savePushToken as persistPushToken, loadPushToken, clearPushToken } from './tokenStore';
 
 // Foreground presentation: show a banner and play sound even while the app is open.
 let handlerSet = false;
@@ -35,24 +36,6 @@ export type PushRegistrationResult = {
   errorMessage?: string;
 };
 
-// Fire-and-forget telemetry ping to backend so we can inspect live device status in /debug-push
-async function sendTelemetry(data: Record<string, any>): Promise<void> {
-  try {
-    if (Platform.OS === 'web') return;
-    await fetch(`${API_BASE_URL}/push-log`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...data,
-        platform: Platform.OS,
-        timestamp: new Date().toISOString(),
-      }),
-    });
-  } catch (_) {
-    // telemetry failure never breaks the app
-  }
-}
-
 export async function checkNotificationPermission(): Promise<{ granted: boolean; status: string }> {
   if (Platform.OS === 'web') return { granted: false, status: 'web' };
   try {
@@ -74,23 +57,12 @@ export async function openNotificationSettings(): Promise<void> {
   }
 }
 
-export async function registerPushToken(authToken: string): Promise<PushRegistrationResult> {
-  let isPhysDevice = true;
-  let deviceName = 'unknown';
-
+export async function registerPushToken(): Promise<PushRegistrationResult> {
   try {
     if (Platform.OS === 'web') {
       return { success: false, token: null, permissionStatus: 'web' };
     }
     await ensureHandler();
-
-    try {
-      const Device = await import('expo-device');
-      isPhysDevice = !!Device.isDevice;
-      deviceName = `${Device.brand || ''} ${Device.modelName || ''}`.trim() || 'Android Device';
-    } catch (_) {}
-
-    await sendTelemetry({ stage: 'start', isPhysDevice, deviceName });
 
     const Notifications = await import('expo-notifications');
     const existing = await Notifications.getPermissionsAsync();
@@ -102,11 +74,8 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
       isGranted = Boolean(requested.granted || requested.status === 'granted');
     }
 
-    await sendTelemetry({ stage: 'permission_checked', finalStatus, isGranted, isPhysDevice });
-
     if (!isGranted) {
       console.warn('Notification permission not granted:', finalStatus);
-      await sendTelemetry({ stage: 'permission_denied', finalStatus });
       return {
         success: false,
         token: null,
@@ -146,11 +115,6 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
         tokenResponse = await Notifications.getExpoPushTokenAsync();
       } catch (fallbackErr: any) {
         console.error('All getExpoPushTokenAsync attempts failed:', fallbackErr);
-        await sendTelemetry({
-          stage: 'token_error',
-          easError: easErr?.message,
-          fallbackError: fallbackErr?.message,
-        });
         return {
           success: false,
           token: null,
@@ -163,7 +127,6 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
     const expoToken = tokenResponse?.data;
     if (!expoToken) {
       console.warn('No Expo push token obtained');
-      await sendTelemetry({ stage: 'token_empty' });
       return {
         success: false,
         token: null,
@@ -172,28 +135,13 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
       };
     }
 
-    await sendTelemetry({ stage: 'token_obtained', tokenPrefix: expoToken.slice(0, 20) });
-
-    const res = await fetch(`${API_BASE_URL}/patients/push-token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-      body: JSON.stringify({ token: expoToken }),
+    await apiPost('/patients/push-token', {
+      token: expoToken,
+      platform: Platform.OS,
     });
+    await persistPushToken(expoToken);
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      console.warn('Backend failed to save push token:', res.status, errText);
-      await sendTelemetry({ stage: 'backend_save_failed', status: res.status, errText });
-      return {
-        success: false,
-        token: expoToken,
-        permissionStatus: finalStatus,
-        errorMessage: `Server failed to save push token (status: ${res.status})`,
-      };
-    }
-
-    console.log('Push token registered successfully:', expoToken);
-    await sendTelemetry({ stage: 'registered_successfully', token: expoToken });
+    console.log('Push token registered successfully');
 
     return {
       success: true,
@@ -201,8 +149,7 @@ export async function registerPushToken(authToken: string): Promise<PushRegistra
       permissionStatus: finalStatus,
     };
   } catch (e: any) {
-    console.warn('registerPushToken error:', e);
-    await sendTelemetry({ stage: 'unexpected_error', error: e?.message });
+    console.warn('registerPushToken error:', e?.message ?? e);
     return {
       success: false,
       token: null,
@@ -233,6 +180,46 @@ export async function addNotificationResponseReceivedListener(
     return Notifications.addNotificationResponseReceivedListener(cb);
   } catch {
     return { remove() {} };
+  }
+}
+
+/**
+ * Returns the notification the app was launched from, if any.
+ *
+ * A response listener only fires for taps while the app is running; a tap that
+ * cold-starts the app has to be read back explicitly or the user lands on the
+ * home screen and the referenced record is never opened.
+ */
+export async function getInitialNotificationResponse(): Promise<any | null> {
+  try {
+    if (Platform.OS === 'web') return null;
+    const Notifications = await import('expo-notifications');
+    if (typeof Notifications.getLastNotificationResponseAsync !== 'function') return null;
+    return await Notifications.getLastNotificationResponseAsync();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deactivates this device's push token for the signed-in account.
+ * Call before clearing the session on logout / account switch so the next
+ * account on this phone does not receive the previous user's notifications.
+ * Best effort: offline logout still proceeds.
+ */
+export async function unregisterPushToken(): Promise<boolean> {
+  try {
+    if (Platform.OS === 'web') return false;
+    const token = await loadPushToken();
+    await apiRequest('/patients/push-token', {
+      method: 'DELETE',
+      json: token ? { token } : {},
+    });
+    await clearPushToken();
+    return true;
+  } catch (e: any) {
+    console.warn('unregisterPushToken error:', e?.message ?? e);
+    return false;
   }
 }
 
@@ -271,27 +258,12 @@ export async function sendLocalTestNotification(
 /**
  * Triggers a backend-initiated push notification through the server -> Expo -> FCM pipeline.
  */
-export async function testServerPush(
-  authToken: string,
-): Promise<{ success: boolean; message: string }> {
+export async function testServerPush(): Promise<{ success: boolean; message: string }> {
   try {
-    const res = await fetch(`${API_BASE_URL}/patients/test-push`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${authToken}`,
-      },
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return {
-        success: false,
-        message: data.error || `Server returned error (${res.status})`,
-      };
-    }
+    const data = await apiPost<{ message?: string }>('/patients/test-push');
     return {
       success: true,
-      message: data.message || 'Test notification sent from server!',
+      message: data?.message || 'Test notification sent from server!',
     };
   } catch (e: any) {
     return {

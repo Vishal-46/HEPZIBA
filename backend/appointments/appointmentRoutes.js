@@ -16,7 +16,7 @@ router.post('/', roleAuth(['patient', 'admin', 'doctor']), [
     body('notes').optional().trim()
 ], validate, ctrl.createAppointment);
 router.get('/my', roleAuth('patient'), ctrl.getMyAppointments);
-router.get('/catalog/doctors', roleAuth('patient'), ctrl.listDoctorsForPatients);
+router.get('/catalog/doctors', roleAuth(['patient', 'admin', 'doctor']), ctrl.listDoctorsForPatients);
 // Doctor endpoint (must be before /:id or "for-me" matches as an id)
 router.get('/for-me', roleAuth('doctor'), ctrl.getForMe);
 // Patient ownership: view / cancel own appointment

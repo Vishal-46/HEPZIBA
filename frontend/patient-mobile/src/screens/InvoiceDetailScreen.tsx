@@ -9,6 +9,7 @@ type Line = { medicine_name: string; quantity: number; mrp?: number | string; to
 export default function InvoiceDetailScreen({ route, navigation }: any) {
   const { invoice } = route.params;
   const [lines, setLines] = useState<Line[] | null>(null);
+  const [linesError, setLinesError] = useState(false);
   const [fee, setFee] = useState<string | null>(null);
   const [status, setStatus] = useState<string>(invoice.status || 'unpaid');
 
@@ -19,16 +20,18 @@ export default function InvoiceDetailScreen({ route, navigation }: any) {
         const data = await apiGet<any>(`/billing/invoices/${invoice.id}`);
         if (!alive) return;
         if (Array.isArray(data?.items)) setLines(data.items);
-        if (data.doctor_fee !== undefined) setFee(String(data.doctor_fee));
-        if (data.status) setStatus(data.status);
+        if (data?.doctor_fee !== undefined) setFee(String(data.doctor_fee));
+        if (data?.status) setStatus(data.status);
       } catch {
-        // Keep the summary the list screen already showed.
+        if (alive) setLinesError(true);
+      } finally {
+        // Never leave the card stuck on a spinner when the detail call fails.
+        if (alive) setLines((prev) => prev ?? []);
       }
     })();
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoice.id]);
 
   const medTotal = (lines ?? []).reduce((s, l) => s + Number(l.total ?? 0), 0);
@@ -46,6 +49,8 @@ export default function InvoiceDetailScreen({ route, navigation }: any) {
             <Text style={s.section}>Medicines</Text>
             {lines === null ? (
               <ActivityIndicator color={COLOR.primary} />
+            ) : linesError ? (
+              <Text style={s.meta}>Could not load medicine details. Pull up this bill again later.</Text>
             ) : lines.length === 0 ? (
               <Text style={s.meta}>No medicine lines.</Text>
             ) : (

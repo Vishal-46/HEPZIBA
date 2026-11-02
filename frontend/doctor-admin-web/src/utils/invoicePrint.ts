@@ -1,5 +1,5 @@
 import type { Invoice } from '../types';
-import { formatDate, maskAadhaar } from './format';
+import { formatDate, formatDateOnly, maskAadhaar } from './format';
 
 export function printInvoice(
   invoice: Invoice,
@@ -19,7 +19,7 @@ export function printInvoice(
 
   const rows = (invoice.items || [])
     .map((item, idx) => {
-      const exp = item.expiry_date ? formatDate(item.expiry_date).slice(0, 10) : '—';
+      const exp = item.expiry_date ? formatDateOnly(item.expiry_date) : '—';
       const mrp = Number(item.mrp || 0).toFixed(2);
       const total = Number(item.total || 0).toFixed(2);
       return `<tr>

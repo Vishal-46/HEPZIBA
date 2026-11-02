@@ -4,7 +4,7 @@ const ctrl = require('./authController');
 
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
-const { loginLimiter, forgotLimiter, resetLimiter } = require('../middleware/rateLimit');
+const { loginLimiter, forgotLimiter, resetLimiter, verifyLimiter } = require('../middleware/rateLimit');
 
 // Registration (public, patient-only)
 router.post('/register/patient', [
@@ -14,7 +14,7 @@ router.post('/register/patient', [
 ], validate, ctrl.registerPatient);
 
 // Email verification (real): code issued at registration, 15-min expiry.
-router.post('/verify-email', [
+router.post('/verify-email', verifyLimiter, [
   body('email').isEmail().normalizeEmail(),
   body('code').matches(/^\d{6}$/),
 ], validate, ctrl.verifyEmail);

@@ -94,6 +94,28 @@ export type ClinicHours = {
   slotMinutes: string;
 };
 
+export type PrescriptionItem = {
+  medicine_name: string;
+  dosage_morning?: boolean;
+  dosage_afternoon?: boolean;
+  dosage_evening?: boolean;
+  dosage_night?: boolean;
+  before_food?: boolean;
+  after_food?: boolean;
+  quantity?: number | string;
+  instructions?: string | null;
+  [key: string]: unknown;
+};
+
+export type Prescription = {
+  id: number;
+  prescribed_on?: string;
+  doctor_name?: string | null;
+  notes?: string | null;
+  items?: PrescriptionItem[];
+  [key: string]: unknown;
+};
+
 export type Patient = {
   id: number;
   patient_id?: number;
@@ -114,7 +136,7 @@ export type Patient = {
   spo2?: number | string;
   created_at?: string;
   appointments?: Appointment[];
-  prescriptions?: unknown[];
+  prescriptions?: Prescription[];
   invoices?: Invoice[];
 };
 
