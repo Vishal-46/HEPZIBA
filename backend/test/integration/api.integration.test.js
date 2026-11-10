@@ -1248,6 +1248,10 @@ nodeTest('API integration: Express + PGlite', async (t) => {
     eq(state.utcZone, 'UTC');
     eq(state.schema.ok, true);
     eq(state.ensureFailures.length, 0, `ensure failures: ${JSON.stringify(state.ensureFailures)}`);
+
+    const h = await req('GET', '/health/db');
+    eq(h.status, 200);
+    eq(h.body && h.body.db, 'up');
   });
 
   // ================================================================

@@ -72,6 +72,16 @@ app.use('/billing', require('./billing/billingRoutes'));
 app.use('/inventory', require('./inventory/inventoryRoutes'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health/db', async (_req, res) => {
+  try {
+    await db.ready;
+    await db.query('SELECT 1');
+    return res.json({ status: 'ok', db: 'up' });
+  } catch (err) {
+    console.error('[health/db] check failed:', err.message);
+    return res.status(503).json({ status: 'error', db: 'down' });
+  }
+});
 
 // Diagnostic push-inspection tool. Admin-only: it reads patient/appointment
 // rows and device push tokens, so it must never be reachable anonymously.

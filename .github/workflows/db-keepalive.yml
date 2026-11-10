@@ -1,0 +1,21 @@
+name: Supabase DB Keep-Alive
+
+on:
+  schedule:
+    # Run once daily at 06:00 UTC so Supabase free-tier never pauses for inactivity.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend DB health endpoint
+        run: |
+          code=$(curl -sS -o /tmp/health_db.json -w "%{http_code}" https://hepziba-backend.vercel.app/health/db)
+          cat /tmp/health_db.json
+          echo ""
+          if [ "$code" != "200" ]; then
+            echo "Keep-alive failed with HTTP $code"
+            exit 1
+          fi
