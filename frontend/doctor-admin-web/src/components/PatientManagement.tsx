@@ -3,7 +3,7 @@ import apiClient, { apiErrorMessage } from '../utils/apiClient';
 import type { Patient } from '../types';
 import { maskAadhaar } from '../utils/format';
 
-import { SearchInput, Pager, LoadingState, EmptyState } from './ListControls';
+import { SearchInput, LoadingState, EmptyState } from './ListControls';
 
 interface Props {
   onSelectPatientForBilling?: (patient: Patient) => void;
@@ -11,7 +11,7 @@ interface Props {
   onViewEHR?: (patient: Patient) => void;
 }
 
-const PAGE_SIZE = 8;
+const BATCH_SIZE = 20;
 
 export default function PatientManagement({
   onSelectPatientForBilling,
@@ -20,10 +20,11 @@ export default function PatientManagement({
 }: Props) {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [page, setPage] = useState(1);
   // Guards against out-of-order search responses overwriting newer results.
   const requestSeq = useRef(0);
 
@@ -46,21 +47,34 @@ export default function PatientManagement({
     photo_url: '',
   });
 
-  const loadPatients = useCallback(async (query = '') => {
+  const loadPatients = useCallback(async (query = '', offset = 0) => {
     const seq = ++requestSeq.current;
-    setLoading(true);
+    if (offset === 0) setLoading(true);
+    else setLoadingMore(true);
     setError('');
     try {
       const res = await apiClient.get<Patient[]>('/patients', {
-        params: { q: query || undefined, limit: 100 },
+        params: { q: query || undefined, limit: BATCH_SIZE, offset },
       });
       if (seq !== requestSeq.current) return;
-      setPatients(Array.isArray(res.data) ? res.data : []);
+      const rows = Array.isArray(res.data) ? res.data : [];
+      setHasMore(rows.length === BATCH_SIZE);
+      if (offset === 0) {
+        setPatients(rows);
+      } else {
+        setPatients((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          return [...prev, ...rows.filter((p) => !seen.has(p.id))];
+        });
+      }
     } catch (err) {
       if (seq !== requestSeq.current) return;
       setError(apiErrorMessage(err, 'Failed to load patients'));
     } finally {
-      if (seq === requestSeq.current) setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
     }
   }, []);
 
@@ -239,9 +253,7 @@ export default function PatientManagement({
       setEditSaving(false);
     }
   };
-  // Pagination
-  const totalPages = Math.max(1, Math.ceil(patients.length / PAGE_SIZE));
-  const currentPatients = patients.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const currentPatients = patients;
 
   return (
     <div className="stack">
@@ -254,7 +266,7 @@ export default function PatientManagement({
           <button className="primaryBtn" onClick={() => setShowModal(true)}>
             + Register New Patient
           </button>
-          <button className="ghostBtn" onClick={() => loadPatients(searchQuery.trim())} disabled={loading}>
+          <button className="ghostBtn" onClick={() => loadPatients(searchQuery.trim(), 0)} disabled={loading}>
             Refresh
           </button>
         </div>
@@ -269,7 +281,6 @@ export default function PatientManagement({
             query={searchQuery}
             onQuery={(q) => {
               setSearchQuery(q);
-              setPage(1);
             }}
             label="Search patients by name, mobile, Aadhaar, or Patient ID…"
           />
@@ -376,13 +387,21 @@ export default function PatientManagement({
               </table>
             </div>
 
-            <Pager
-              page={page}
-              totalPages={totalPages}
-              onPage={setPage}
-              total={patients.length}
-              label="Patients"
-            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px' }}>
+              <span className="muted" style={{ fontSize: '13px' }}>
+                Showing {patients.length} patient{patients.length === 1 ? '' : 's'}
+              </span>
+              {hasMore && (
+                <button
+                  type="button"
+                  className="ghostBtn"
+                  onClick={() => void loadPatients(searchQuery.trim(), patients.length)}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? 'Loading more…' : 'Load more patients'}
+                </button>
+              )}
+            </div>
           </>
         )}
       </div>

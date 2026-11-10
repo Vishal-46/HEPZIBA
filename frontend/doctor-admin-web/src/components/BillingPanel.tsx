@@ -3,7 +3,7 @@ import apiClient, { apiErrorMessage } from '../utils/apiClient';
 import type { Invoice, InvoiceItem, Patient } from '../types';
 import { formatDate } from '../utils/format';
 import { printInvoice } from '../utils/invoicePrint';
-import { SearchInput, Pager, LoadingState, EmptyState } from './ListControls';
+import { SearchInput, LoadingState, EmptyState } from './ListControls';
 
 interface Props {
   initialPatient?: Patient | null;
@@ -11,7 +11,7 @@ interface Props {
 }
 
 const DEFAULT_DOCTOR = 'Dr. T. Joseph Pratheeban, DCH, MD (Respiratory Medicine)';
-const PAGE_SIZE = 8;
+const BATCH_SIZE = 20;
 
 const blankItem = (): InvoiceItem => ({
   medicine_name: '',
@@ -25,10 +25,11 @@ const blankItem = (): InvoiceItem => ({
 export default function BillingPanel({ initialPatient, onClearInitialPatient }: Props) {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [page, setPage] = useState(1);
 
   // Bill creation form
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(initialPatient || null);
@@ -47,25 +48,38 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
     return () => clearTimeout(timer);
   }, [initialPatient]);
 
-  const loadInvoices = async () => {
-    setLoading(true);
+  const loadInvoices = async (query = '', offset = 0) => {
+    if (offset === 0) setLoading(true);
+    else setLoadingMore(true);
     setError('');
     try {
-      const res = await apiClient.get<Invoice[]>('/billing/invoices');
-      setInvoices(Array.isArray(res.data) ? res.data : []);
+      const res = await apiClient.get<Invoice[]>('/billing/invoices', {
+        params: { q: query || undefined, limit: BATCH_SIZE, offset },
+      });
+      const rows = Array.isArray(res.data) ? res.data : [];
+      setHasMore(rows.length === BATCH_SIZE);
+      if (offset === 0) {
+        setInvoices(rows);
+      } else {
+        setInvoices((prev) => {
+          const seen = new Set(prev.map((inv) => inv.id));
+          return [...prev, ...rows.filter((inv) => !seen.has(inv.id))];
+        });
+      }
     } catch (err) {
       setError(apiErrorMessage(err, 'Failed to load invoices'));
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   };
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      void loadInvoices();
-    }, 0);
+      void loadInvoices(searchQuery.trim(), 0);
+    }, 250);
     return () => clearTimeout(timer);
-  }, []);
+  }, [searchQuery]);
 
   // Search patients for billing
   const searchPatients = async (q: string) => {
@@ -174,20 +188,7 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
     }
   };
 
-  // Filter invoices for table
-  const filteredInvoices = useMemo(() => {
-    if (!searchQuery.trim()) return invoices;
-    const q = searchQuery.toLowerCase();
-    return invoices.filter(
-      (inv) =>
-        String(inv.id).includes(q) ||
-        (inv.patient_name && inv.patient_name.toLowerCase().includes(q)) ||
-        (inv.patient_code && inv.patient_code.toLowerCase().includes(q))
-    );
-  }, [invoices, searchQuery]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredInvoices.length / PAGE_SIZE));
-  const currentInvoices = filteredInvoices.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const currentInvoices = invoices;
 
   return (
     <div className="stack">
@@ -196,7 +197,7 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
           <h2>Billing & Invoicing</h2>
           <p className="muted">Generate bills, track medicine sales/procedures, and print patient receipts.</p>
         </div>
-        <button className="ghostBtn" onClick={loadInvoices} disabled={loading}>
+        <button className="ghostBtn" onClick={() => void loadInvoices(searchQuery.trim(), 0)} disabled={loading}>
           Refresh Invoices
         </button>
       </div>
@@ -408,15 +409,14 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
             query={searchQuery}
             onQuery={(q) => {
               setSearchQuery(q);
-              setPage(1);
             }}
-            label="Search invoices by patient name, ID, or bill #…"
+            label="Search invoices by patient name, ID, or doctor…"
           />
         </div>
 
         {loading ? (
           <LoadingState message="Loading invoices..." />
-        ) : filteredInvoices.length === 0 ? (
+        ) : currentInvoices.length === 0 ? (
           <EmptyState message="No invoices recorded yet." />
         ) : (
           <>
@@ -471,13 +471,21 @@ export default function BillingPanel({ initialPatient, onClearInitialPatient }: 
               </table>
             </div>
 
-            <Pager
-              page={page}
-              totalPages={totalPages}
-              onPage={setPage}
-              total={filteredInvoices.length}
-              label="Invoices"
-            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px' }}>
+              <span className="muted" style={{ fontSize: '13px' }}>
+                Showing {currentInvoices.length} invoice{currentInvoices.length === 1 ? '' : 's'}
+              </span>
+              {hasMore && (
+                <button
+                  type="button"
+                  className="ghostBtn"
+                  onClick={() => void loadInvoices(searchQuery.trim(), invoices.length)}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? 'Loading more…' : 'Load more invoices'}
+                </button>
+              )}
+            </div>
           </>
         )}
       </section>

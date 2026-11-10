@@ -20,6 +20,36 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Thrown by `refreshAccess` when the refresh attempt could not reach the
+ * server or hit a 5xx/timeout. `apiClient` treats this as transient and keeps
+ * the user's persisted session instead of forcing a logout.
+ */
+export class RefreshTransientError extends Error {
+  constructor(message = 'Could not refresh session right now.') {
+    super(message);
+    this.name = 'RefreshTransientError';
+  }
+}
+
+/**
+ * Best-effort client-side check of a JWT `exp` claim (no signature verify).
+ * Used to refresh proactively before firing a burst of authenticated calls.
+ */
+export function isJwtExpiringSoon(token: string, skewSeconds = 120): boolean {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3 || typeof atob !== 'function') return false;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const json = JSON.parse(atob(b64 + pad)) as { exp?: unknown };
+    if (typeof json.exp !== 'number') return false;
+    return json.exp * 1000 <= Date.now() + skewSeconds * 1000;
+  } catch {
+    return false;
+  }
+}
+
 type TokenProvider = () => string | null | Promise<string | null>;
 
 export type ApiClientOptions = {
@@ -93,16 +123,9 @@ export function createApiClient(clientOptions: ApiClientOptions = {}) {
     if (!inflightRefresh) {
       inflightRefresh = Promise.resolve()
         .then(() => clientOptions.refreshAccess!())
-        .then(
-          (token) => {
-            inflightRefresh = null;
-            return token;
-          },
-          () => {
-            inflightRefresh = null;
-            return null;
-          },
-        );
+        .finally(() => {
+          inflightRefresh = null;
+        });
     }
     return inflightRefresh;
   };
@@ -128,8 +151,14 @@ export function createApiClient(clientOptions: ApiClientOptions = {}) {
       if (response.status === 401) {
         // Transparent rotation: one refresh attempt, then exactly one retry.
         if (!retried && tokenOverride === undefined) {
-          const fresh = await runRefresh();
-          if (fresh) return request<T>(path, { ...options, token: fresh }, true);
+          try {
+            const fresh = await runRefresh();
+            if (fresh) return request<T>(path, { ...options, token: fresh }, true);
+          } catch (refreshErr) {
+            if (refreshErr instanceof RefreshTransientError) {
+              throw refreshErr;
+            }
+          }
         }
         clientOptions.onUnauthorized?.();
         const payload = await safeJson(response);
@@ -147,6 +176,9 @@ export function createApiClient(clientOptions: ApiClientOptions = {}) {
       return payload as T;
     } catch (error) {
       if (error instanceof ApiError) throw error;
+      if (error instanceof RefreshTransientError) {
+        throw new Error('Cannot reach the server. Please try again in a moment.');
+      }
       throw new Error(friendlyNetworkMessage(error));
     } finally {
       clearTimeout(timeout);

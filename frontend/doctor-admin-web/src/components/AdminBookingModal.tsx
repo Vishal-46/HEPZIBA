@@ -35,7 +35,9 @@ export default function AdminBookingModal({ patient, onClose, onSuccess }: Props
       .then((res) => {
         if (Array.isArray(res.data) && res.data.length > 0) {
           setDoctors(res.data);
-          setSelectedDoctorId(res.data[0].doctor_id);
+          // Auto-select only when a single doctor exists; otherwise keep
+          // Auto-Assign (Least Busy) or let admin pick deliberately.
+          setSelectedDoctorId(res.data.length === 1 ? res.data[0].doctor_id : '');
         }
       })
       .catch(() => {});
@@ -59,7 +61,9 @@ export default function AdminBookingModal({ patient, onClose, onSuccess }: Props
       const res = await apiClient.post('/appointments', {
         patient_id: patient.id || patient.patient_id,
         scheduled_at: apptDate.toISOString(),
-        ...(selectedDoctorId ? { doctor_id: Number(selectedDoctorId) } : {}),
+        ...(selectedDoctorId
+          ? { doctor_id: Number(selectedDoctorId) }
+          : { auto_assign: 'least_busy' }),
         reason: reason.trim() || undefined,
         notes: notes.trim() || undefined,
       });
@@ -100,7 +104,7 @@ export default function AdminBookingModal({ patient, onClose, onSuccess }: Props
               value={selectedDoctorId}
               onChange={(e) => setSelectedDoctorId(e.target.value ? Number(e.target.value) : '')}
             >
-              <option value="">Auto-Assign (First Available)</option>
+              <option value="">Auto-Assign (Least Busy Doctor)</option>
               {doctors.map((d) => (
                 <option key={d.doctor_id} value={d.doctor_id}>
                   {d.name} {d.specialty ? `— ${d.specialty}` : ''}

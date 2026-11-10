@@ -151,8 +151,10 @@ exports.getMyPrescriptions = async (req, res) => {
     const patient_id = patientQ.rows[0].id;
 
     const prescriptionsQ = await pool.query(
-      `SELECT p.*
+      `SELECT p.*, COALESCE(p.doctor_name, du.name) AS doctor_name
        FROM prescriptions p
+       LEFT JOIN doctors d ON d.id = p.doctor_id
+       LEFT JOIN users du ON du.id = d.user_id
        WHERE p.patient_id=$1
        ORDER BY p.prescribed_on DESC
        LIMIT $2 OFFSET $3`,
@@ -191,7 +193,12 @@ exports.getByAppointment = async (req, res) => {
     if (!Number.isInteger(appointmentId)) return res.status(400).json({ error: 'Invalid appointment id' });
 
     const prescriptionQ = await pool.query(
-      'SELECT * FROM prescriptions WHERE appointment_id=$1 ORDER BY prescribed_on DESC LIMIT 1',
+      `SELECT p.*, COALESCE(p.doctor_name, du.name) AS doctor_name
+         FROM prescriptions p
+         LEFT JOIN doctors d ON d.id = p.doctor_id
+         LEFT JOIN users du ON du.id = d.user_id
+        WHERE p.appointment_id=$1
+        ORDER BY p.prescribed_on DESC LIMIT 1`,
       [appointmentId]
     );
 

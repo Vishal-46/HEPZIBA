@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Session } from '../types';
 import { clearSession, loadSession, saveSession } from '../utils/authStorage';
-import apiClient from '../utils/apiClient';
+import apiClient, { SESSION_UPDATED_EVENT } from '../utils/apiClient';
 
 /**
  * Persistent session hook.
@@ -16,7 +16,14 @@ export function useSession() {
     // Session is already restored via the lazy initializer above; this effect
     // only flips the flag after mount to avoid a sync setState-in-effect.
     const id = requestAnimationFrame(() => setRestored(true));
-    return () => cancelAnimationFrame(id);
+    const syncSession = () => setSession(loadSession());
+    window.addEventListener(SESSION_UPDATED_EVENT, syncSession);
+    window.addEventListener('storage', syncSession);
+    return () => {
+      cancelAnimationFrame(id);
+      window.removeEventListener(SESSION_UPDATED_EVENT, syncSession);
+      window.removeEventListener('storage', syncSession);
+    };
   }, []);
 
   const login = useCallback((next: Session) => {

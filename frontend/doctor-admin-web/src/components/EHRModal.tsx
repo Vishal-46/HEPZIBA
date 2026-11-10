@@ -12,9 +12,12 @@ interface Props {
   onClose: () => void;
 }
 
+const EHR_BATCH = 15;
+
 export default function EHRModal({ patient, onClose }: Props) {
   const [data, setData] = useState<Patient | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState<'appointments' | 'prescriptions' | 'invoices' | null>(null);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'vitals' | 'visits' | 'prescriptions' | 'billing'>('vitals');
 
@@ -24,7 +27,9 @@ export default function EHRModal({ patient, onClose }: Props) {
       setError('');
       try {
         const id = patient.id || patient.patient_id;
-        const res = await apiClient.get<Patient>(`/patients/${id}?reveal=contact`);
+        const res = await apiClient.get<Patient>(
+          `/patients/${id}?reveal=contact&appt_limit=${EHR_BATCH}&rx_limit=${EHR_BATCH}&inv_limit=${EHR_BATCH}`,
+        );
         setData(res.data);
       } catch (err) {
         setError(apiErrorMessage(err, 'Failed to fetch electronic health records'));
@@ -34,6 +39,60 @@ export default function EHRModal({ patient, onClose }: Props) {
     };
     fetchEHR();
   }, [patient]);
+
+  const loadMoreSection = async (section: 'appointments' | 'prescriptions' | 'invoices') => {
+    if (loadingMore || !data) return;
+    setLoadingMore(section);
+    try {
+      const id = patient.id || patient.patient_id;
+      const offset =
+        section === 'appointments'
+          ? (data.appointments?.length ?? 0)
+          : section === 'prescriptions'
+            ? (data.prescriptions?.length ?? 0)
+            : (data.invoices?.length ?? 0);
+      const paramPrefix =
+        section === 'appointments' ? 'appt' : section === 'prescriptions' ? 'rx' : 'inv';
+      const res = await apiClient.get<Patient>(
+        `/patients/${id}?reveal=contact&only=${section}&${paramPrefix}_limit=${EHR_BATCH}&${paramPrefix}_offset=${offset}`,
+      );
+      setData((prev) => {
+        if (!prev) return res.data;
+        if (section === 'appointments') {
+          const existing = prev.appointments ?? [];
+          const seen = new Set(existing.map((x) => x.id));
+          const incoming = (res.data.appointments ?? []).filter((x) => !seen.has(x.id));
+          return {
+            ...prev,
+            appointments: [...existing, ...incoming],
+            appointments_has_more: Boolean(res.data.appointments_has_more),
+          };
+        }
+        if (section === 'prescriptions') {
+          const existing = prev.prescriptions ?? [];
+          const seen = new Set(existing.map((x) => x.id));
+          const incoming = (res.data.prescriptions ?? []).filter((x) => !seen.has(x.id));
+          return {
+            ...prev,
+            prescriptions: [...existing, ...incoming],
+            prescriptions_has_more: Boolean(res.data.prescriptions_has_more),
+          };
+        }
+        const existing = prev.invoices ?? [];
+        const seen = new Set(existing.map((x) => x.id));
+        const incoming = (res.data.invoices ?? []).filter((x) => !seen.has(x.id));
+        return {
+          ...prev,
+          invoices: [...existing, ...incoming],
+          invoices_has_more: Boolean(res.data.invoices_has_more),
+        };
+      });
+    } catch (err) {
+      setError(apiErrorMessage(err, `Failed to load more ${section}`));
+    } finally {
+      setLoadingMore(null);
+    }
+  };
 
   const p = data || patient;
 
@@ -139,6 +198,7 @@ export default function EHRModal({ patient, onClose }: Props) {
                 {!p.appointments || p.appointments.length === 0 ? (
                   <p className="muted">No visit history recorded for this patient.</p>
                 ) : (
+                  <>
                   <table className="dataTable">
                     <thead>
                       <tr>
@@ -154,7 +214,7 @@ export default function EHRModal({ patient, onClose }: Props) {
                         <tr key={a.id}>
                           <td>{formatDate(String(a.scheduled_at_effective || a.scheduled_at || ''))}</td>
                           <td><strong>Token #{String(a.token_number || a.id)}</strong></td>
-                          <td>{String(a.doctor_name || 'Dr. T. Joseph Pratheeban')}</td>
+                          <td>{String(a.doctor_name || 'Clinic Doctor')}</td>
                           <td>{String(a.reason || '—')}</td>
                           <td>
                             <span className={`pill status ${normalizeAppointmentStatus(a.status)}`}>{normalizeAppointmentStatus(a.status)}</span>
@@ -163,6 +223,19 @@ export default function EHRModal({ patient, onClose }: Props) {
                       ))}
                     </tbody>
                   </table>
+                  {p.appointments_has_more && (
+                    <div style={{ marginTop: '12px', textAlign: 'center' }}>
+                      <button
+                        type="button"
+                        className="ghostBtn"
+                        onClick={() => void loadMoreSection('appointments')}
+                        disabled={loadingMore !== null}
+                      >
+                        {loadingMore === 'appointments' ? 'Loading…' : 'Load more visits'}
+                      </button>
+                    </div>
+                  )}
+                  </>
                 )}
               </div>
             )}
@@ -178,7 +251,7 @@ export default function EHRModal({ patient, onClose }: Props) {
                       <div key={rx.id} className="card" style={{ padding: '12px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                           <strong>Prescription #{rx.id} · {formatDate(rx.prescribed_on)}</strong>
-                          <span className="muted">Doctor: {rx.doctor_name || 'Dr. T. Joseph Pratheeban'}</span>
+                          <span className="muted">Doctor: {rx.doctor_name || 'Clinic Doctor'}</span>
                         </div>
                         {rx.notes && <p style={{ fontSize: '13px', margin: '0 0 8px 0' }}><em>Notes: {rx.notes}</em></p>}
                         <table className="dataTable" style={{ fontSize: '13px' }}>
@@ -210,6 +283,18 @@ export default function EHRModal({ patient, onClose }: Props) {
                         </table>
                       </div>
                     ))}
+                    {p.prescriptions_has_more && (
+                      <div style={{ textAlign: 'center' }}>
+                        <button
+                          type="button"
+                          className="ghostBtn"
+                          onClick={() => void loadMoreSection('prescriptions')}
+                          disabled={loadingMore !== null}
+                        >
+                          {loadingMore === 'prescriptions' ? 'Loading…' : 'Load more prescriptions'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -264,6 +349,18 @@ export default function EHRModal({ patient, onClose }: Props) {
                         </table>
                       </div>
                     ))}
+                    {p.invoices_has_more && (
+                      <div style={{ textAlign: 'center' }}>
+                        <button
+                          type="button"
+                          className="ghostBtn"
+                          onClick={() => void loadMoreSection('invoices')}
+                          disabled={loadingMore !== null}
+                        >
+                          {loadingMore === 'invoices' ? 'Loading…' : 'Load more bills'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

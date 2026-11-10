@@ -776,15 +776,44 @@ function bearerFrom(req) {
   return null;
 }
 
-// POST /auth/logout { refreshToken? } -> revokes the refresh token (if given)
+// POST /auth/logout { refreshToken?, pushToken? } -> revokes the refresh token (if given)
 // AND denylists the current access JWT (if a Bearer is present), so logout
-// takes effect immediately instead of at access expiry. Always 200.
+// takes effect immediately instead of at access expiry. Also deactivates the
+// caller's push token when provided so a device whose access token expired
+// before logout still stops receiving notifications for the signed-out user.
 exports.logout = async (req, res) => {
   try {
-    const { refreshToken } = req.body || {};
-    if (refreshToken && typeof refreshToken === 'string') await revokeRefreshToken(refreshToken);
+    const { refreshToken, pushToken } = req.body || {};
+    let actorUserId = null;
+    if (refreshToken && typeof refreshToken === 'string') {
+      const { sha256Hex } = require('./sessionTokens');
+      const rt = await pool.query(
+        'SELECT user_id FROM refresh_tokens WHERE token_hash = $1',
+        [sha256Hex(refreshToken)],
+      );
+      if (rt.rows[0]?.user_id) actorUserId = Number(rt.rows[0].user_id);
+      await revokeRefreshToken(refreshToken);
+    }
     const access = bearerFrom(req);
-    if (access) await denylistAccessToken(access);
+    if (access) {
+      if (!actorUserId && process.env.JWT_SECRET) {
+        try {
+          const verified = jwt.verify(access, process.env.JWT_SECRET, { ignoreExpiration: true });
+          if (verified && verified.id) actorUserId = Number(verified.id);
+        } catch {
+          // ignore malformed token
+        }
+      }
+      await denylistAccessToken(access);
+    }
+    if (actorUserId && pushToken && typeof pushToken === 'string' && pushToken.trim()) {
+      await pool.query(
+        `UPDATE patient_push_tokens
+            SET is_active = FALSE, updated_at = NOW()
+          WHERE user_id = $1 AND token = $2 AND is_active IS TRUE`,
+        [actorUserId, pushToken.trim()],
+      ).catch(() => {});
+    }
   } catch (e) {
     console.error('logout:', e && e.message);
   }

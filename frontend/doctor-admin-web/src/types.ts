@@ -18,6 +18,9 @@ export type Session = {
 
 export type Appointment = {
   id: number;
+  patient_id?: number | null;
+  doctor_id?: number | null;
+  doctor_name?: string | null;
   patient_name?: string;
   patient_aadhaar?: string | null;
   aadhaar?: string | null;
@@ -26,6 +29,12 @@ export type Appointment = {
   status?: string;
   notes?: string;
   [key: string]: unknown;
+};
+
+export type DoctorCatalogItem = {
+  doctor_id: number;
+  name: string;
+  specialty?: string | null;
 };
 
 export type AdminUser = {
@@ -136,8 +145,11 @@ export type Patient = {
   spo2?: number | string;
   created_at?: string;
   appointments?: Appointment[];
+  appointments_has_more?: boolean;
   prescriptions?: Prescription[];
+  prescriptions_has_more?: boolean;
   invoices?: Invoice[];
+  invoices_has_more?: boolean;
 };
 
 export type InvoiceItem = {

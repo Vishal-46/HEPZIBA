@@ -1100,6 +1100,114 @@ nodeTest('API integration: Express + PGlite', async (t) => {
     eq((await db.query('SELECT status FROM appointments WHERE id=$1', [id])).rows[0].status, 'done', 'completed visit was overwritten by a cancel');
   });
 
+  await test('doctor catalog includes doctors without pre-created profile rows and least_busy balances bookings', async () => {
+    // Insert a doctor user directly without a doctors profile row
+    const noProfUser = await db.query(
+      `INSERT INTO users (name, email, password, role, active, email_verified)
+       VALUES ('Doctor NoProfile', 'doctornoprof@example.test', 'x', 'doctor', TRUE, TRUE)
+       RETURNING id`
+    );
+    const uid = noProfUser.rows[0].id;
+    try {
+      const cat = await req('GET', '/appointments/catalog/doctors', { token: patientA.token });
+      eq(cat.status, 200);
+      const found = cat.body.find((d) => d.name === 'Doctor NoProfile');
+      assert(found, 'doctor user without pre-existing profile row was hidden from catalog');
+      assert(Number.isInteger(found.doctor_id) && found.doctor_id !== uid, 'catalog should auto-provision canonical doctors.id');
+
+      // Test least_busy auto-assignment balances across active doctors on a fresh day
+      const balDay = new Date(Date.now() + 25 * 86400000);
+      balDay.setUTCHours(9, 0, 0, 0);
+      const b1 = await req('POST', '/appointments', {
+        token: patientA.token,
+        body: { scheduled_at: new Date(balDay.getTime() + 600000).toISOString(), auto_assign: 'least_busy', reason: 'bal1' },
+      });
+      const b2 = await req('POST', '/appointments', {
+        token: patientB.token,
+        body: { scheduled_at: new Date(balDay.getTime() + 1200000).toISOString(), auto_assign: 'least_busy', reason: 'bal2' },
+      });
+      eq(b1.status, 200);
+      eq(b2.status, 200);
+      assert(b1.body.appointment.doctor_id !== b2.body.appointment.doctor_id, 'least_busy assigned both patients to the same doctor');
+    } finally {
+      await db.query('DELETE FROM appointments WHERE reason IN ($1, $2)', ['bal1', 'bal2']);
+      await db.query('DELETE FROM doctors WHERE user_id=$1', [uid]);
+      await db.query('DELETE FROM users WHERE id=$1', [uid]);
+    }
+  });
+
+  await test('admin can reassign doctor and send message notification to appointment owner only', async () => {
+    const when = new Date(Date.now() + 26 * 86400000).toISOString();
+    const booked = await req('POST', '/appointments', {
+      token: patientA.token,
+      body: { scheduled_at: when, doctor_id: ids.doctorProfile1, reason: 'reassign-test' },
+    });
+    eq(booked.status, 200);
+    const apptId = booked.body.appointment.id;
+
+    // Register push token for doctor2 to verify reassignment notifies doctor2
+    const doc2Push = 'ExponentPushToken[integration-doc2]';
+    eq((await req('POST', '/patients/push-token', { token: doctor2.token, body: { token: doc2Push } })).status, 200);
+
+    sentPushes.length = 0;
+    const reassigned = await req('PATCH', `/admin/appointments/${apptId}`, {
+      token: admin.token,
+      body: { doctor_id: ids.doctorProfile2 },
+    });
+    eq(reassigned.status, 200, JSON.stringify(reassigned.body));
+    eq(reassigned.body.appointment.doctor_id, ids.doctorProfile2);
+    assert(sentPushes.some((p) => Array.isArray(p.tokens) && p.tokens.includes(doc2Push)), 'reassigned doctor was not notified');
+    assert(!sentPushes.some((p) => Array.isArray(p.tokens) && p.tokens.includes(tokenB)), 'unrelated patient notified on doctor reassignment');
+
+    // Sending a message (notes only, no status) notifies only patientA
+    sentPushes.length = 0;
+    const msgRes = await req('PATCH', `/admin/appointments/${apptId}`, {
+      token: admin.token,
+      body: { notes: 'Please bring your previous chest X-ray.' },
+    });
+    eq(msgRes.status, 200);
+    const patCall = sentPushes.find((p) => Array.isArray(p.tokens) && p.tokens.includes(token1));
+    assert(patCall, 'patient was not notified of clinic message');
+    assert(!patCall.tokens.includes(tokenB) && !patCall.tokens.includes(tokenC), 'clinic message leaked to other patients');
+
+    eq((await req('DELETE', '/patients/push-token', { token: doctor2.token, body: { token: doc2Push } })).status, 200);
+  });
+
+  await test('logout with refreshToken + pushToken deactivates push token even without access JWT', async () => {
+    const sOut = await login('patient.d@example.test');
+    const patDToken = 'ExponentPushToken[integration-patd-logout]';
+    eq((await req('POST', '/patients/push-token', { token: sOut.token, body: { token: patDToken } })).status, 200);
+    assert((await push.tokensForUser(ids['patient.d@example.test'])).includes(patDToken));
+
+    // Simulate expired access token during logout: omit Authorization header, pass refreshToken + pushToken
+    const outRes = await req('POST', '/auth/logout', {
+      body: { refreshToken: sOut.refreshToken, pushToken: patDToken },
+    });
+    eq(outRes.status, 200);
+    assert(!(await push.tokensForUser(ids['patient.d@example.test'])).includes(patDToken), 'push token stayed active after logout');
+  });
+
+  await test('batch pagination works for admin/users and EHR sections include doctor_name + has_more', async () => {
+    const uPage1 = await req('GET', '/admin/users?limit=2&offset=0', { token: admin.token });
+    const uPage2 = await req('GET', '/admin/users?limit=2&offset=2', { token: admin.token });
+    eq(uPage1.status, 200);
+    eq(uPage2.status, 200);
+    eq(uPage1.body.length, 2);
+    assert(uPage2.body.length >= 1);
+    assert(!uPage1.body.some((u) => uPage2.body.some((u2) => u2.id === u.id)), 'admin/users pagination overlapped');
+
+    const ehrBatch = await req('GET', `/patients/${ids.patientA}?only=appointments&appt_limit=1&appt_offset=0`, { token: admin.token });
+    eq(ehrBatch.status, 200);
+    eq(ehrBatch.body.appointments.length, 1);
+    eq(ehrBatch.body.appointments_has_more, true, 'expected appointments_has_more=true when >1 appointment exists');
+
+    const rxMy = await req('GET', '/prescriptions/my?limit=10&offset=0', { token: patientA.token });
+    eq(rxMy.status, 200);
+    if (rxMy.body.length > 0) {
+      assert(rxMy.body[0].doctor_name, 'getMyPrescriptions missing doctor_name');
+    }
+  });
+
   // ================================================================
   // DB session timezone + startup schema validation
   // ================================================================

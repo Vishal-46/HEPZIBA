@@ -16,8 +16,8 @@ type AcctTab = 'doctors' | 'admins' | 'patients';
 
 export default function AdminPanel() {
   const {
-    users, patients, appointments, inventory, invoices,
-    loading, error, setError, load,
+    users, patients, appointments, inventory, invoices, doctorsCatalog,
+    hasMore, loadingMore, loading, error, setError, load, loadMore,
     createInventoryItem, updateInventoryItem,
     toggleUserActive, createStaff, updateAppointment, createInvoice, updateInvoiceStatus,
     refreshAppointmentsQuiet,
@@ -270,89 +270,124 @@ export default function AdminPanel() {
               {queue.length === 0 ? (
                 <EmptyState message={appointments.length === 0 ? 'No appointments yet — patient bookings from the mobile app will appear here.' : 'Queue is clear.'} />
               ) : (
-                queue.slice(0, 30).map((a) => (
-                  <article key={a.id} className={`queueCard ${a.status === 'pending' ? 'urgent' : ''} ${newIds.includes(a.id) ? 'fresh' : ''}`}>
-                    <div className="queueTop">
-                      <div>
-                        <p className="queueName">
-                          {String(a.patient_name ?? 'Patient')} <span className="muted">#{a.id}</span>{' '}
-                          {newIds.includes(a.id) && <span className="freshTag">New</span>}
-                        </p>
-                        <p className="queueSub">
-                          {a.patient_code ? `${String(a.patient_code)} · ` : ''}
-                          {a.mobile ? `${String(a.mobile)} · ` : ''}
-                          {formatDate(String(a.scheduled_at_effective ?? a.scheduled_at ?? ''))}
-                          {a.token_number ? ` · Token ${String(a.token_number)}` : ''}
-                        </p>
-                        {a.reason ? <p className="queueSub">Reason: {String(a.reason)}</p> : null}
-                        {typeof a.notes === 'string' && a.notes ? (
-                          <div className="queueNote" aria-label="Visit note">
-                            <span className="queueNoteTag">Note</span>
-                            <p>{a.notes}</p>
-                          </div>
-                        ) : null}
+                <>
+                  {queue.map((a) => (
+                    <article key={a.id} className={`queueCard ${a.status === 'pending' ? 'urgent' : ''} ${newIds.includes(a.id) ? 'fresh' : ''}`}>
+                      <div className="queueTop">
+                        <div>
+                          <p className="queueName">
+                            {String(a.patient_name ?? 'Patient')} <span className="muted">#{a.id}</span>{' '}
+                            {newIds.includes(a.id) && <span className="freshTag">New</span>}
+                          </p>
+                          <p className="queueSub">
+                            {a.patient_code ? `${String(a.patient_code)} · ` : ''}
+                            {a.mobile ? `${String(a.mobile)} · ` : ''}
+                            {formatDate(String(a.scheduled_at_effective ?? a.scheduled_at ?? ''))}
+                            {a.token_number ? ` · Token ${String(a.token_number)}` : ''}
+                            {a.doctor_name ? ` · Dr. ${String(a.doctor_name).replace(/^Dr\.?\s*/i, '')}` : ''}
+                          </p>
+                          {a.reason ? <p className="queueSub">Reason: {String(a.reason)}</p> : null}
+                          {typeof a.notes === 'string' && a.notes ? (
+                            <div className="queueNote" aria-label="Visit note">
+                              <span className="queueNoteTag">Note</span>
+                              <p>{a.notes}</p>
+                            </div>
+                          ) : null}
+                        </div>
+                        <span style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
+                          <span className={`pill status ${normalizeAppointmentStatus(a.status)}`}>{normalizeAppointmentStatus(a.status)}</span>
+                          {(() => {
+                            const s = String(a.scheduled_at_effective ?? a.scheduled_at ?? '');
+                            return s && new Date(s).toDateString() === todayStr ? (
+                              <span className="pill status confirmed">Today</span>
+                            ) : null;
+                          })()}
+                        </span>
                       </div>
-                      <span style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
-                        <span className={`pill status ${normalizeAppointmentStatus(a.status)}`}>{normalizeAppointmentStatus(a.status)}</span>
-                        {(() => {
-                          const s = String(a.scheduled_at_effective ?? a.scheduled_at ?? '');
-                          return s && new Date(s).toDateString() === todayStr ? (
-                            <span className="pill status confirmed">Today</span>
-                          ) : null;
-                        })()}
-                      </span>
-                    </div>
-                    <div className="queueActions">
-                      {a.status === 'pending' && (
-                        <>
-                          <button className="acceptBtn" disabled={!!busy}
+                      <div className="queueActions">
+                        {a.status === 'pending' && (
+                          <>
+                            <button className="acceptBtn" disabled={!!busy}
+                              onClick={() => {
+                                setNewIds((prev) => prev.filter((id) => id !== a.id));
+                                run(`accept-${a.id}`, () => updateAppointment(a.id, { status: 'confirmed', notes: messageFor(a) || undefined }));
+                              }}>
+                              Accept
+                            </button>
+                            <button className="declineBtn" disabled={!!busy}
+                              onClick={() => {
+                                setNewIds((prev) => prev.filter((id) => id !== a.id));
+                                run(`decline-${a.id}`, () => updateAppointment(a.id, { status: 'cancelled', notes: messageFor(a) || undefined }));
+                              }}>
+                              Decline
+                            </button>
+                          </>
+                        )}
+                        {a.status === 'confirmed' && (
+                          <button className="doneBtn" disabled={!!busy}
                             onClick={() => {
                               setNewIds((prev) => prev.filter((id) => id !== a.id));
-                              run(`accept-${a.id}`, () => updateAppointment(a.id, { status: 'confirmed', notes: messageFor(a) || undefined }));
+                              run(`done-${a.id}`, () => updateAppointment(a.id, { status: 'done' }));
                             }}>
-                            Accept
+                            Mark done
                           </button>
-                          <button className="declineBtn" disabled={!!busy}
-                            onClick={() => {
-                              setNewIds((prev) => prev.filter((id) => id !== a.id));
-                              run(`decline-${a.id}`, () => updateAppointment(a.id, { status: 'cancelled', notes: messageFor(a) || undefined }));
-                            }}>
-                            Decline
+                        )}
+                        {(a.status === 'pending' || a.status === 'confirmed') && doctorsCatalog.length > 0 && (
+                          <select
+                            className="proSelect"
+                            aria-label={`Assign doctor for appointment ${a.id}`}
+                            disabled={!!busy}
+                            value={a.doctor_id ? String(a.doctor_id) : ''}
+                            onChange={(e) => {
+                              const nextDocId = Number(e.target.value);
+                              if (!nextDocId || nextDocId === Number(a.doctor_id)) return;
+                              run(`doc-${a.id}`, () => updateAppointment(a.id, { doctor_id: nextDocId }));
+                            }}
+                          >
+                            <option value="" disabled>Assign doctor…</option>
+                            {doctorsCatalog.map((d) => (
+                              <option key={d.doctor_id} value={d.doctor_id}>
+                                {d.name}{d.specialty ? ` (${d.specialty})` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {Number(a.patient_id) > 0 && (
+                          <button className="ghostBtn" disabled={!!busy}
+                            onClick={() => setEhrPatient({
+                              id: Number(a.patient_id),
+                              name: String(a.patient_name ?? 'Patient'),
+                              patient_code: typeof a.patient_code === 'string' ? a.patient_code : undefined,
+                              mobile: typeof a.mobile === 'string' ? a.mobile : undefined,
+                            })}>
+                            Record
                           </button>
-                        </>
-                      )}
-                      {a.status === 'confirmed' && (
-                        <button className="doneBtn" disabled={!!busy}
-                          onClick={() => {
-                            setNewIds((prev) => prev.filter((id) => id !== a.id));
-                            run(`done-${a.id}`, () => updateAppointment(a.id, { status: 'done' }));
-                          }}>
-                          Mark done
-                        </button>
-                      )}
-                      {Number(a.patient_id) > 0 && (
+                        )}
+                      </div>
+                      <textarea className="msgBox" rows={2} placeholder="Message to patient (saved as visit note, visible in their app)…"
+                        value={messageFor(a)}
+                        onChange={(e) => setMsgDrafts((p) => ({ ...p, [a.id]: e.target.value }))} aria-label={`Message for appointment ${a.id}`} />
+                      <div className="queueActions">
                         <button className="ghostBtn" disabled={!!busy}
-                          onClick={() => setEhrPatient({
-                            id: Number(a.patient_id),
-                            name: String(a.patient_name ?? 'Patient'),
-                            patient_code: typeof a.patient_code === 'string' ? a.patient_code : undefined,
-                            mobile: typeof a.mobile === 'string' ? a.mobile : undefined,
-                          })}>
-                          Record
+                          onClick={() => run(`msg-${a.id}`, () => updateAppointment(a.id, { notes: messageFor(a) }))}>
+                          {busy === `msg-${a.id}` ? 'Sending…' : 'Send message'}
                         </button>
-                      )}
-                    </div>
-                    <textarea className="msgBox" rows={2} placeholder="Message to patient (saved as visit note, visible in their app)…"
-                      value={messageFor(a)}
-                      onChange={(e) => setMsgDrafts((p) => ({ ...p, [a.id]: e.target.value }))} aria-label={`Message for appointment ${a.id}`} />
-                    <div className="queueActions">
-                      <button className="ghostBtn" disabled={!!busy}
-                        onClick={() => run(`msg-${a.id}`, () => updateAppointment(a.id, { notes: messageFor(a) }))}>
-                        {busy === `msg-${a.id}` ? 'Sending…' : 'Send message'}
+                      </div>
+                    </article>
+                  ))}
+                  {hasMore.appointments && (
+                    <div style={{ marginTop: 12, textAlign: 'center' }}>
+                      <button
+                        type="button"
+                        className="ghostBtn"
+                        onClick={() => void loadMore('appointments')}
+                        disabled={loadingMore !== null}
+                      >
+                        {loadingMore === 'appointments' ? 'Loading more…' : 'Load more appointments'}
                       </button>
                     </div>
-                  </article>
-                ))
+                  )}
+                </>
               )}
             </section>
           </>
@@ -415,21 +450,35 @@ export default function AdminPanel() {
             ) : acctRows.length === 0 ? (
               <EmptyState message="No accounts in this group yet." />
             ) : (
-              (acctRows as Array<Record<string, unknown>>).slice(0, 40).map((r, idx) => {
-                const u = r as unknown as { id: number; name: string; email?: string; role: string; active?: boolean };
-                return (
-                  <div key={u.id ?? idx} className="acctRow">
-                    <div className="who">
-                      <strong>{u.name}<span className={`roleTag ${u.role}`}>{u.role}</span></strong>
-                      <span>{u.email}{u.active === false ? ' · deactivated' : ''}</span>
+              <>
+                {(acctRows as Array<Record<string, unknown>>).map((r, idx) => {
+                  const u = r as unknown as { id: number; name: string; email?: string; role: string; active?: boolean };
+                  return (
+                    <div key={u.id ?? idx} className="acctRow">
+                      <div className="who">
+                        <strong>{u.name}<span className={`roleTag ${u.role}`}>{u.role}</span></strong>
+                        <span>{u.email}{u.active === false ? ' · deactivated' : ''}</span>
+                      </div>
+                      <button className="ghostBtn" disabled={!!busy}
+                        onClick={() => run(`u-${u.id}`, () => toggleUserActive(u.id, !(u.active !== false)))}>
+                        {u.active === false ? 'Reactivate' : 'Deactivate'}
+                      </button>
                     </div>
-                    <button className="ghostBtn" disabled={!!busy}
-                      onClick={() => run(`u-${u.id}`, () => toggleUserActive(u.id, !(u.active !== false)))}>
-                      {u.active === false ? 'Reactivate' : 'Deactivate'}
+                  );
+                })}
+                {hasMore.users && (
+                  <div style={{ marginTop: 12, textAlign: 'center' }}>
+                    <button
+                      type="button"
+                      className="ghostBtn"
+                      onClick={() => void loadMore('users')}
+                      disabled={loadingMore !== null}
+                    >
+                      {loadingMore === 'users' ? 'Loading more…' : 'Load more accounts'}
                     </button>
                   </div>
-                );
-              })
+                )}
+              </>
             )}
           </section>
         )}
@@ -502,23 +551,37 @@ export default function AdminPanel() {
               {invRows.length === 0 ? (
                 <EmptyState message={inventory.length === 0 ? 'No items yet — add the first one below.' : 'No items match.'} />
               ) : (
-                invRows.slice(0, 40).map((i) => (
-                  <div key={i.id} className="acctRow">
-                    <div className="who">
-                      <strong>{i.name} {i.stock <= i.reorder_level && <span className="pill status cancelled">Low</span>}</strong>
-                      <span>
-                        {i.unit}{i.mrp ? ` · ₹${String(i.mrp)}` : ''}{i.expiry_date ? ` · exp ${String(i.expiry_date).slice(0, 7)}` : ''}
-                      </span>
+                <>
+                  {invRows.map((i) => (
+                    <div key={i.id} className="acctRow">
+                      <div className="who">
+                        <strong>{i.name} {i.stock <= i.reorder_level && <span className="pill status cancelled">Low</span>}</strong>
+                        <span>
+                          {i.unit}{i.mrp ? ` · ₹${String(i.mrp)}` : ''}{i.expiry_date ? ` · exp ${String(i.expiry_date).slice(0, 7)}` : ''}
+                        </span>
+                      </div>
+                      <div className="stepper" aria-label={`${i.name} stock`}>
+                        <button disabled={!!busy} aria-label="Decrease stock"
+                          onClick={() => run(`inv-${i.id}-dec`, () => updateInventoryItem(i.id, { stock: Math.max(0, i.stock - 1) }))}>−</button>
+                        <strong>{i.stock}</strong>
+                        <button disabled={!!busy} aria-label="Increase stock"
+                          onClick={() => run(`inv-${i.id}-inc`, () => updateInventoryItem(i.id, { stock: i.stock + 1 }))}>+</button>
+                      </div>
                     </div>
-                    <div className="stepper" aria-label={`${i.name} stock`}>
-                      <button disabled={!!busy} aria-label="Decrease stock"
-                        onClick={() => run(`inv-${i.id}-dec`, () => updateInventoryItem(i.id, { stock: Math.max(0, i.stock - 1) }))}>−</button>
-                      <strong>{i.stock}</strong>
-                      <button disabled={!!busy} aria-label="Increase stock"
-                        onClick={() => run(`inv-${i.id}-inc`, () => updateInventoryItem(i.id, { stock: i.stock + 1 }))}>+</button>
+                  ))}
+                  {hasMore.inventory && (
+                    <div style={{ marginTop: 12, textAlign: 'center' }}>
+                      <button
+                        type="button"
+                        className="ghostBtn"
+                        onClick={() => void loadMore('inventory')}
+                        disabled={loadingMore !== null}
+                      >
+                        {loadingMore === 'inventory' ? 'Loading more…' : 'Load more inventory'}
+                      </button>
                     </div>
-                  </div>
-                ))
+                  )}
+                </>
               )}
             </section>
             <section className="card" aria-label="Add item">
@@ -672,10 +735,14 @@ export default function AdminPanel() {
                     if (!billPatient) throw new Error('Pick a patient from the search list first.');
                     const items = billLines.map((l) => ({ medicine_name: l.medicine_name.trim(), quantity: Number(l.quantity) || 1, mrp: l.mrp.trim(), unit: 'strip' }));
                     if (items.some((x) => !x.medicine_name || !x.mrp)) throw new Error('Every line needs a name and MRP.');
+                    const selectedAppt = billApptId
+                      ? patientAppts.find((a) => a.id === Number(billApptId))
+                      : undefined;
                     await createInvoice({
                       patient_id: billPatient.patient_id as number,
                       patient_code: billPatient.patient_code ?? undefined,
                       appointment_id: billApptId ? Number(billApptId) : null,
+                      doctor_name: typeof selectedAppt?.doctor_name === 'string' && selectedAppt.doctor_name ? selectedAppt.doctor_name : undefined,
                       doctor_fee: docFee.trim() || undefined,
                       items,
                     } as never);
@@ -692,30 +759,44 @@ export default function AdminPanel() {
               {invoices.length === 0 ? (
                 <EmptyState message="No invoices yet." />
               ) : (
-                invoices.slice(0, 20).map((v) => (
-                  <div key={v.id} className="acctRow">
-                    <div className="who">
-                      <strong>#{v.id} · ₹{String(v.total_amount)}</strong>
-                      <span>{String(v.patient_name ?? '')} {v.patient_code ? `(${String(v.patient_code)})` : ''} · {v.invoice_date ? formatDate(String(v.invoice_date)) : ''}</span>
-                    </div>
-                    <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      <span className={`pill status ${String(v.status || 'unpaid') === 'paid' ? 'confirmed' : 'pending'}`}>
-                        {String(v.status || 'unpaid')}
+                <>
+                  {invoices.map((v) => (
+                    <div key={v.id} className="acctRow">
+                      <div className="who">
+                        <strong>#{v.id} · ₹{String(v.total_amount)}</strong>
+                        <span>{String(v.patient_name ?? '')} {v.patient_code ? `(${String(v.patient_code)})` : ''} · {v.invoice_date ? formatDate(String(v.invoice_date)) : ''}</span>
+                      </div>
+                      <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <span className={`pill status ${String(v.status || 'unpaid') === 'paid' ? 'confirmed' : 'pending'}`}>
+                          {String(v.status || 'unpaid')}
+                        </span>
+                        <button className="ghostBtn" disabled={!!busy}
+                          onClick={() => run(`pay-${v.id}`, () => updateInvoiceStatus(v.id, String(v.status) === 'paid' ? 'unpaid' : 'paid'))}>
+                          {String(v.status) === 'paid' ? 'Mark unpaid' : 'Mark paid'}
+                        </button>
+                        <button className="ghostBtn" disabled={!!busy}
+                          onClick={() => run(`print-${v.id}`, async () => {
+                            const res = await apiClient.get(`/billing/invoices/${v.id}?reveal=contact`);
+                            printInvoice(res.data);
+                          })}>
+                          {busy === `print-${v.id}` ? '…' : 'Print'}
+                        </button>
                       </span>
-                      <button className="ghostBtn" disabled={!!busy}
-                        onClick={() => run(`pay-${v.id}`, () => updateInvoiceStatus(v.id, String(v.status) === 'paid' ? 'unpaid' : 'paid'))}>
-                        {String(v.status) === 'paid' ? 'Mark unpaid' : 'Mark paid'}
+                    </div>
+                  ))}
+                  {hasMore.invoices && (
+                    <div style={{ marginTop: 12, textAlign: 'center' }}>
+                      <button
+                        type="button"
+                        className="ghostBtn"
+                        onClick={() => void loadMore('invoices')}
+                        disabled={loadingMore !== null}
+                      >
+                        {loadingMore === 'invoices' ? 'Loading more…' : 'Load more invoices'}
                       </button>
-                      <button className="ghostBtn" disabled={!!busy}
-                        onClick={() => run(`print-${v.id}`, async () => {
-                          const res = await apiClient.get(`/billing/invoices/${v.id}?reveal=contact`);
-                          printInvoice(res.data);
-                        })}>
-                        {busy === `print-${v.id}` ? '…' : 'Print'}
-                      </button>
-                    </span>
-                  </div>
-                ))
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </section>

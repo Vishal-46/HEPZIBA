@@ -71,34 +71,49 @@ exports.createAppointment = async (req, res) => {
         patient_id = q.rows[0].id;
       }
 
-      // Default doctor: first active doctor profile; else first active
-      // doctor user (creating its profile row); else fail loudly.
+      // Default doctor: when auto_assign='least_busy' is requested, balance across
+      // active doctors by fewest non-cancelled visits on that day (ties -> d.id).
+      // Otherwise preserve single-doctor clinic default (first active doctor).
       if (!doctorIdProvided) {
-        const firstDoc = await client.query(
-          `SELECT d.id FROM doctors d JOIN users u ON u.id = d.user_id
-           WHERE COALESCE(u.active, TRUE) = TRUE AND u.role='doctor'
-           ORDER BY d.id LIMIT 1`
+        const autoBalance = String(req.body.auto_assign || '').trim().toLowerCase() === 'least_busy';
+        const dayKey = scheduledAtISO.slice(0, 10);
+        // Ensure every active doctor user has a doctors profile row before selecting.
+        await client.query(
+          `INSERT INTO doctors (user_id)
+           SELECT u.id
+             FROM users u
+             LEFT JOIN doctors d ON d.user_id = u.id
+            WHERE u.role = 'doctor'
+              AND COALESCE(u.active, TRUE) = TRUE
+              AND d.id IS NULL
+           ON CONFLICT (user_id) DO NOTHING`
         );
-        if (firstDoc.rows.length) {
-          doctorIdNum = firstDoc.rows[0].id;
-        } else {
-          const firstUser = await client.query(
-            `SELECT id FROM users WHERE role='doctor' AND COALESCE(active, TRUE) = TRUE ORDER BY id LIMIT 1`
-          );
-          if (!firstUser.rows.length) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ error: 'No doctors available right now' });
-          }
-          const du = firstUser.rows[0].id;
-          const hasProfile = await client.query('SELECT id FROM doctors WHERE user_id=$1', [du]);
-          if (hasProfile.rows.length) doctorIdNum = hasProfile.rows[0].id;
-          else {
-            const created = await client.query(
-              'INSERT INTO doctors (user_id) VALUES ($1) RETURNING id', [du]
+        const docPick = autoBalance
+          ? await client.query(
+              `SELECT d.id
+                 FROM doctors d
+                 JOIN users u ON u.id = d.user_id
+                 LEFT JOIN appointments a
+                   ON a.doctor_id = d.id
+                  AND DATE(COALESCE(a.scheduled_at, a.date_time)) = DATE($1)
+                  AND COALESCE(a.status, 'pending') <> 'cancelled'
+                WHERE COALESCE(u.active, TRUE) = TRUE
+                  AND u.role = 'doctor'
+                GROUP BY d.id
+                ORDER BY COUNT(a.id) ASC, d.id ASC
+                LIMIT 1`,
+              [dayKey]
+            )
+          : await client.query(
+              `SELECT d.id FROM doctors d JOIN users u ON u.id = d.user_id
+               WHERE COALESCE(u.active, TRUE) = TRUE AND u.role='doctor'
+               ORDER BY d.id LIMIT 1`
             );
-            doctorIdNum = created.rows[0].id;
-          }
+        if (!docPick.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'No doctors available right now' });
         }
+        doctorIdNum = docPick.rows[0].id;
       }
 
       // Resolve doctor profile id from either doctors.id or users.id
@@ -379,29 +394,28 @@ exports.getForMe = async (req, res) => {
 // Patient-visible doctor catalog for booking UI
 exports.listDoctorsForPatients = async (req, res) => {
   try {
-    // First try normalized doctor profile table.
+    // Ensure every active doctor user has a canonical doctors profile row so
+    // no active doctor is ever hidden or exposed with a colliding users.id.
+    await pool.query(
+      `INSERT INTO doctors (user_id)
+       SELECT u.id
+         FROM users u
+         LEFT JOIN doctors d ON d.user_id = u.id
+        WHERE u.role = 'doctor'
+          AND COALESCE(u.active, TRUE) = TRUE
+          AND d.id IS NULL
+       ON CONFLICT (user_id) DO NOTHING`
+    );
+
     const doctorsQ = await pool.query(
       `SELECT d.id AS doctor_id, u.name, d.specialty, d.phone, d.bio
        FROM doctors d
        INNER JOIN users u ON u.id = d.user_id
        WHERE COALESCE(u.active, TRUE) = TRUE AND u.role = 'doctor'
-       ORDER BY u.name ASC`
+       ORDER BY u.name ASC, d.id ASC`
     );
 
-    if (doctorsQ.rows.length) {
-      return res.json(doctorsQ.rows);
-    }
-
-    // Fallback: if doctor profiles are not yet created, expose doctor users
-    // so patient booking still works by user id.
-    const fallbackQ = await pool.query(
-      `SELECT u.id AS doctor_id, u.name, NULL::text AS specialty, NULL::text AS phone, NULL::text AS bio
-       FROM users u
-       WHERE u.role='doctor' AND COALESCE(u.active, TRUE) = TRUE
-       ORDER BY u.name ASC`
-    );
-
-    return res.json(fallbackQ.rows);
+    return res.json(doctorsQ.rows);
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to fetch doctor list' });

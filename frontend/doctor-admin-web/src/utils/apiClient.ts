@@ -53,32 +53,76 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// Single-flight silent refresh: concurrent 401s share one /auth/refresh call.
+export const SESSION_UPDATED_EVENT = 'hepziba:session-updated';
+
+class RefreshTransientError extends Error {
+  constructor(message = 'Session refresh temporarily unavailable') {
+    super(message);
+    this.name = 'RefreshTransientError';
+  }
+}
+
+async function performRefreshLocked(): Promise<string | null> {
+  // Re-read storage inside lock so another tab that just rotated wins.
+  const tokenBefore = getStoredToken();
+  const refreshToken = getStoredRefreshToken();
+  if (!refreshToken) return null;
+
+  try {
+    const res = await axios.post(
+      `${API_BASE_URL}/auth/refresh`,
+      { refreshToken },
+      { timeout: 15000 },
+    );
+    const data = res.data as { token?: string; refreshToken?: string; user?: unknown };
+    if (!data?.token) {
+      throw new RefreshTransientError('Invalid refresh response');
+    }
+    try {
+      localStorage.setItem(TOKEN_KEY, data.token);
+      localStorage.setItem('token', data.token);
+      if (data.refreshToken) localStorage.setItem(REFRESH_KEY, data.refreshToken);
+      if (data.user) localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event(SESSION_UPDATED_EVENT));
+      }
+    } catch {
+      // Storage unavailable; the retry below still uses the new token.
+    }
+    return data.token;
+  } catch (err) {
+    if (err instanceof RefreshTransientError) throw err;
+    if (axios.isAxiosError(err)) {
+      const status = err.response?.status;
+      if (status === 401 || status === 400) {
+        // Another tab may have rotated right before us without Web Locks;
+        // if storage now has a newer token, reuse it instead of logging out.
+        const tokenAfter = getStoredToken();
+        if (tokenAfter && tokenAfter !== tokenBefore) return tokenAfter;
+        return null;
+      }
+    }
+    throw new RefreshTransientError('Could not refresh session right now');
+  }
+}
+
+// Single-flight silent refresh: concurrent 401s share one /auth/refresh call,
+// and browser tabs serialize via Web Locks when available.
 let inflightRefresh: Promise<string | null> | null = null;
 function runRefresh(): Promise<string | null> {
-  const refreshToken = getStoredRefreshToken();
-  if (!refreshToken) return Promise.resolve(null);
+  if (!getStoredRefreshToken()) return Promise.resolve(null);
   if (!inflightRefresh) {
-    inflightRefresh = axios
-      .post(`${API_BASE_URL}/auth/refresh`, { refreshToken }, { timeout: 15000 })
-      .then((res) => {
-        const data = res.data as { token?: string; refreshToken?: string; user?: unknown };
-        if (!data?.token) return null;
-        try {
-          localStorage.setItem(TOKEN_KEY, data.token);
-          localStorage.setItem('token', data.token);
-          if (data.refreshToken) localStorage.setItem(REFRESH_KEY, data.refreshToken);
-          if (data.user) localStorage.setItem(USER_KEY, JSON.stringify(data.user));
-        } catch {
-          // Storage unavailable; the retry below still uses the new token.
-        }
-        return data.token;
-      })
-      .catch(() => null)
-      .then((token) => {
-        inflightRefresh = null;
-        return token;
-      });
+    const execute = async (): Promise<string | null> => {
+      if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+        return navigator.locks.request('hepziba-auth-refresh', async () => {
+          return performRefreshLocked();
+        });
+      }
+      return performRefreshLocked();
+    };
+    inflightRefresh = execute().finally(() => {
+      inflightRefresh = null;
+    });
   }
   return inflightRefresh;
 }
@@ -99,11 +143,17 @@ apiClient.interceptors.response.use(
     const original = error.config as (typeof error.config & { _retry?: boolean }) | undefined;
     if (error.response?.status === 401 && original && !original._retry) {
       original._retry = true;
-      const fresh = await runRefresh();
-      if (fresh) {
-        original.headers = original.headers ?? {};
-        (original.headers as Record<string, string>).Authorization = `Bearer ${fresh}`;
-        return apiClient(original);
+      try {
+        const fresh = await runRefresh();
+        if (fresh) {
+          original.headers = original.headers ?? {};
+          (original.headers as Record<string, string>).Authorization = `Bearer ${fresh}`;
+          return apiClient(original);
+        }
+      } catch (refreshErr) {
+        if (refreshErr instanceof RefreshTransientError) {
+          return Promise.reject(error);
+        }
       }
     }
     if (error.response?.status === 401) {

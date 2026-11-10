@@ -2,23 +2,50 @@ import { useCallback, useState } from 'react';
 import apiClient, { apiErrorMessage } from '../utils/apiClient';
 import type { Appointment, MedicineRow } from '../types';
 
+const BATCH_SIZE = 25;
+
 export function useDoctorAppointments() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await apiClient.get<Appointment[]>('/appointments/for-me?limit=100&reveal=contact');
-      setAppointments(Array.isArray(res.data) ? res.data : []);
+      const res = await apiClient.get<Appointment[]>(`/appointments/for-me?limit=${BATCH_SIZE}&offset=0&reveal=contact`);
+      const rows = Array.isArray(res.data) ? res.data : [];
+      setAppointments(rows);
+      setHasMore(rows.length === BATCH_SIZE);
     } catch (err) {
       setError(apiErrorMessage(err, 'Failed to load appointments'));
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    setError('');
+    try {
+      const res = await apiClient.get<Appointment[]>(
+        `/appointments/for-me?limit=${BATCH_SIZE}&offset=${appointments.length}&reveal=contact`,
+      );
+      const next = Array.isArray(res.data) ? res.data : [];
+      setAppointments((prev) => {
+        const seen = new Set(prev.map((a) => a.id));
+        return [...prev, ...next.filter((a) => !seen.has(a.id))];
+      });
+      setHasMore(next.length === BATCH_SIZE);
+    } catch (err) {
+      setError(apiErrorMessage(err, 'Failed to load more appointments'));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [appointments.length, hasMore, loadingMore]);
 
   const updateStatus = useCallback(
     async (id: number, status: string, notes: string) => {
@@ -70,5 +97,17 @@ export function useDoctorAppointments() {
     }
   }, []);
 
-  return { appointments, loading, error, setError, load, updateStatus, createPrescription, getPrescription };
+  return {
+    appointments,
+    loading,
+    loadingMore,
+    hasMore,
+    error,
+    setError,
+    load,
+    loadMore,
+    updateStatus,
+    createPrescription,
+    getPrescription,
+  };
 }

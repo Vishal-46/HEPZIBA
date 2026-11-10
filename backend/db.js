@@ -179,6 +179,14 @@ const ensureStatements = [
      WHERE sent_at IS NULL`,
   `CREATE INDEX IF NOT EXISTS appointment_reminders_sent_idx
      ON appointment_reminders (sent_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_appointments_doctor_sched
+     ON appointments (doctor_id, COALESCE(scheduled_at, date_time) DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_appointments_patient_sched
+     ON appointments (patient_id, COALESCE(scheduled_at, date_time) DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_prescriptions_patient_date
+     ON prescriptions (patient_id, prescribed_on DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_invoices_patient_date
+     ON invoices (patient_id, invoice_date DESC)`,
 ];
 
 // In production, a partial schema is fatal. Outside production it is a loud

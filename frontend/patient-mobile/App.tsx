@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { ActivityIndicator, SafeAreaView, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Platform, SafeAreaView, Text, View } from 'react-native';
 import {
   useFonts,
   Manrope_400Regular,
@@ -14,11 +14,18 @@ import PatientHomeScreen from './src/screens/PatientHomeScreen';
 import { COLOR } from './theme';
 import type { Session, User } from './src/utils/sessionTypes';
 import {
+  clearPushToken,
   clearSession,
+  loadPushToken,
   loadSession,
   saveSession,
 } from './src/utils/tokenStore';
-import { configureApiClient, apiGet } from './src/utils/apiClient';
+import {
+  configureApiClient,
+  apiGet,
+  isJwtExpiringSoon,
+  RefreshTransientError,
+} from './src/utils/apiClient';
 import { API_BASE_URL } from './src/config/api';
 
 const paperTheme = {
@@ -39,6 +46,8 @@ export default function App() {
   const [restoreError, setRestoreError] = useState('');
   const sessionRef = useRef<Session | null>(null);
   sessionRef.current = session;
+  const loggingOutRef = useRef(false);
+  const inflightRefreshRef = useRef<Promise<string | null> | null>(null);
 
   const [fontsLoaded] = useFonts({
     Manrope_400Regular,
@@ -47,41 +56,59 @@ export default function App() {
   });
 
   const handleLogout = useCallback(async () => {
+    if (loggingOutRef.current) return;
+    loggingOutRef.current = true;
     const stale = sessionRef.current;
-    // Deactivate this device's push registration first (best effort) so the
-    // next account on this phone cannot receive this user's notifications.
-    if (stale) {
-      try {
-        const push = await import('./src/utils/pushRegistration');
-        await push.unregisterPushToken();
-      } catch {
-        // Offline logout still clears the local session below.
-      }
-    }
-    // Server-side logout (best effort): revokes the refresh token and
-    // denylists the access jti so the JWT dies now, not at expiry.
-    if (stale?.token || stale?.refreshToken) {
-      try {
-        await fetch(`${API_BASE_URL}/auth/logout`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(stale.token ? { Authorization: `Bearer ${stale.token}` } : {}),
-          },
-          body: JSON.stringify(stale.refreshToken ? { refreshToken: stale.refreshToken } : {}),
-        });
-      } catch {
-        // Offline logout still clears the local session below.
-      }
-    }
+    // Clear the live ref before network calls so concurrent 401s cannot
+    // re-enter logout or trigger a refresh loop.
+    sessionRef.current = null;
     try {
+      const pushToken = await loadPushToken().catch(() => null);
+      // Best-effort push deactivation via direct fetch (never apiRequest, which
+      // would attempt refresh / onUnauthorized on an expired JWT).
+      if (stale?.token && Platform.OS !== 'web') {
+        try {
+          await fetch(`${API_BASE_URL}/patients/push-token`, {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${stale.token}`,
+            },
+            body: JSON.stringify(pushToken ? { token: pushToken } : {}),
+          });
+        } catch {
+          // /auth/logout below also deactivates pushToken using refreshToken.
+        }
+        await clearPushToken().catch(() => {});
+      }
+      // Server-side logout (best effort): revokes the refresh token,
+      // denylists the access jti, and deactivates pushToken even when JWT expired.
+      if (stale?.token || stale?.refreshToken) {
+        try {
+          await fetch(`${API_BASE_URL}/auth/logout`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(stale.token ? { Authorization: `Bearer ${stale.token}` } : {}),
+            },
+            body: JSON.stringify({
+              ...(stale.refreshToken ? { refreshToken: stale.refreshToken } : {}),
+              ...(pushToken ? { pushToken } : {}),
+            }),
+          });
+        } catch {
+          // Offline logout still clears the local session below.
+        }
+      }
       await clearSession();
     } finally {
       setSession(null);
+      loggingOutRef.current = false;
     }
   }, []);
 
   const handleLoginSuccess = useCallback(async (nextSession: Session) => {
+    sessionRef.current = nextSession;
     setSession(nextSession);
     try {
       await saveSession(nextSession);
@@ -90,49 +117,74 @@ export default function App() {
     }
   }, []);
 
+  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
+    if (inflightRefreshRef.current) return inflightRefreshRef.current;
+    const run = (async (): Promise<string | null> => {
+      const stale = sessionRef.current ?? (await loadSession().catch(() => null));
+      if (!stale?.refreshToken) return null;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refreshToken: stale.refreshToken }),
+          signal: controller.signal,
+        });
+        if (res.status === 401 || res.status === 400) {
+          // Definitive server rejection (expired/revoked/invalid refresh token).
+          return null;
+        }
+        if (!res.ok) {
+          // 5xx / 429 / cold-start failure: do NOT wipe user's persisted login.
+          throw new RefreshTransientError(`Refresh failed (${res.status})`);
+        }
+        const payload = (await res.json().catch(() => null)) as any;
+        if (!payload?.token || !payload?.user) {
+          throw new RefreshTransientError('Invalid refresh response');
+        }
+        const next: Session = {
+          token: String(payload.token),
+          refreshToken: payload.refreshToken ? String(payload.refreshToken) : stale.refreshToken,
+          user: payload.user,
+        };
+        sessionRef.current = next;
+        setSession(next);
+        try {
+          await saveSession(next);
+        } catch {
+          // In-memory session still works for this launch.
+        }
+        return next.token;
+      } catch (err) {
+        if (err instanceof RefreshTransientError) throw err;
+        throw new RefreshTransientError(
+          err instanceof Error ? err.message : 'Network error during refresh',
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    })().finally(() => {
+      inflightRefreshRef.current = null;
+    });
+    inflightRefreshRef.current = run;
+    return run;
+  }, []);
+
   // Wire the shared fetch client to the current token + global 401 logout.
   useEffect(() => {
     configureApiClient({
       getToken: () => sessionRef.current?.token ?? null,
       onUnauthorized: () => {
         // Fire-and-forget; guard against logout loops when already logged out.
-        if (sessionRef.current) void handleLogout();
+        if (sessionRef.current && !loggingOutRef.current) void handleLogout();
       },
-      // Silent rotation: expired access (15m) is refreshed from the stored
-      // refresh token and the failed request retried once — no re-login.
-      refreshAccess: async () => {
-        const stale = sessionRef.current;
-        if (!stale?.refreshToken) return null;
-        try {
-          const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refreshToken: stale.refreshToken }),
-          });
-          if (!res.ok) return null;
-          const payload = (await res.json().catch(() => null)) as any;
-          if (!payload?.token || !payload?.user) return null;
-          const next: Session = {
-            token: String(payload.token),
-            refreshToken: payload.refreshToken ? String(payload.refreshToken) : stale.refreshToken,
-            user: payload.user,
-          };
-          sessionRef.current = next;
-          setSession(next);
-          try {
-            await saveSession(next);
-          } catch {
-            // In-memory session still works for this launch.
-          }
-          return next.token;
-        } catch {
-          return null;
-        }
-      },
+      refreshAccess: refreshAccessToken,
     });
-  }, [handleLogout]);
+  }, [handleLogout, refreshAccessToken]);
 
-  // Restore persisted session once on launch.
+  // Restore persisted session once on launch, proactively refreshing an
+  // expired/expiring access token before child screens fire requests.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -140,25 +192,41 @@ export default function App() {
         const stored = await loadSession();
         if (!cancelled && stored?.token) {
           sessionRef.current = stored;
-          setSession(stored);
+          let activeSession = stored;
+          if (stored.refreshToken && isJwtExpiringSoon(stored.token)) {
+            try {
+              const fresh = await refreshAccessToken();
+              if (!fresh && !cancelled) {
+                // Refresh token was definitively rejected -> clear stale session.
+                await clearSession().catch(() => {});
+                sessionRef.current = null;
+                setSession(null);
+                return;
+              }
+              if (sessionRef.current) activeSession = sessionRef.current;
+            } catch {
+              // Offline / transient error: keep persisted session and let UI show offline state.
+            }
+          }
+          if (!cancelled) setSession(activeSession);
           // Token present but cached user unusable (e.g. JSON corrupt / legacy
-          // placeholder) → hydrate the real patient via /patients/me.
-          if (stored.user.id === 0) {
+          // placeholder) -> hydrate the real patient via /patients/me.
+          if (!cancelled && activeSession.user.id === 0) {
             try {
               const me = await apiGet<any>('/patients/me');
               const meUser: User = {
                 id: Number(me?.id ?? 0),
-                name: String(me?.name ?? stored.user.name ?? ''),
-                email: String(me?.email ?? stored.user.email ?? ''),
-                role: (me?.role as User['role']) ?? stored.user.role,
+                name: String(me?.name ?? activeSession.user.name ?? ''),
+                email: String(me?.email ?? activeSession.user.email ?? ''),
+                role: (me?.role as User['role']) ?? activeSession.user.role,
               };
               const next: Session = {
-                token: stored.token,
-                ...(stored.refreshToken ? { refreshToken: stored.refreshToken } : {}),
+                token: sessionRef.current?.token ?? activeSession.token,
+                refreshToken: sessionRef.current?.refreshToken ?? activeSession.refreshToken,
                 user: meUser,
               };
               sessionRef.current = next;
-              setSession(next);
+              if (!cancelled) setSession(next);
               try {
                 await saveSession(next);
               } catch {
@@ -178,7 +246,30 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshAccessToken]);
+
+  // Proactively refresh expiring access token when returning to foreground so
+  // resumed sessions stay seamlessly logged in across idle periods.
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') return;
+      const cur = sessionRef.current;
+      if (!cur?.token || !cur.refreshToken) return;
+      if (isJwtExpiringSoon(cur.token)) {
+        void refreshAccessToken()
+          .then((fresh) => {
+            if (!fresh && sessionRef.current && !loggingOutRef.current) {
+              void handleLogout();
+            }
+          })
+          .catch(() => {
+            // Keep session on transient/offline error.
+          });
+      }
+    });
+    return () => sub.remove();
+  }, [handleLogout, refreshAccessToken]);
 
   if (!fontsLoaded || restoring) {
     return (

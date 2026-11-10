@@ -9,11 +9,37 @@ const {
 const { maskPatientContact, maskPatientContacts, shouldRevealContact } = require('../utils/pii');
 
 
-// GET /admin/users?role=...
+// GET /admin/users?role=&search=&limit=&offset=
 exports.listUsers = async (req, res) => {
-  const { role } = req.query;
+  const role = req.query.role ? String(req.query.role).trim() : '';
+  const search = req.query.search ? String(req.query.search).trim() : '';
+  let limit = Number(req.query.limit ?? 50);
+  let offset = Number(req.query.offset ?? 0);
+  if (!Number.isInteger(limit) || limit < 1) limit = 50;
+  if (limit > 200) limit = 200;
+  if (!Number.isInteger(offset) || offset < 0) offset = 0;
+
   try {
-    const q = await pool.query('SELECT id, name, email, role, active, email_verified, created_at FROM users' + (role ? ' WHERE role=$1' : '') + ' ORDER BY id ASC', role ? [role] : []);
+    const conds = [];
+    const vals = [];
+    if (role) {
+      vals.push(role);
+      conds.push(`role = $${vals.length}`);
+    }
+    if (search) {
+      vals.push(`%${search}%`);
+      conds.push(`(name ILIKE $${vals.length} OR email ILIKE $${vals.length})`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    vals.push(limit, offset);
+    const q = await pool.query(
+      `SELECT id, name, email, role, active, email_verified, created_at
+         FROM users
+        ${where}
+        ORDER BY id ASC
+        LIMIT $${vals.length - 1} OFFSET $${vals.length}`,
+      vals,
+    );
     res.json(q.rows);
   } catch (e) {
     console.error(e); res.status(500).json({ error: 'Failed to list users' });
@@ -208,89 +234,178 @@ exports.listAppointments = async (req, res) => {
     console.error(e); res.status(500).json({ error: 'Failed to list appointments' });
   }
 };
-// PATCH /admin/appointments/:id - Admin may set any whitelisted status (bypass ownership)
+// PATCH /admin/appointments/:id - Admin may set any whitelisted status, notes, or reassign doctor
 exports.updateAppointmentStatus = async (req, res) => {
-  try {
-    const appointmentId = Number(req.params.id);
-    if (!Number.isInteger(appointmentId)) return res.status(400).json({ error: 'Invalid appointment id' });
-    const { status, notes } = req.body || {};
+  const appointmentId = Number(req.params.id);
+  if (!Number.isInteger(appointmentId)) return res.status(400).json({ error: 'Invalid appointment id' });
+  const { status, notes, doctor_id } = req.body || {};
 
-    let nextStatus = null;
-    if (status !== undefined && status !== null) {
-      nextStatus = normalizeAppointmentStatus(status);
-      if (!nextStatus) {
-        return res.status(400).json({ error: `status must be one of ${APPOINTMENT_STATUSES.join('|')}` });
+  let nextStatus = null;
+  if (status !== undefined && status !== null) {
+    nextStatus = normalizeAppointmentStatus(status);
+    if (!nextStatus) {
+      return res.status(400).json({ error: `status must be one of ${APPOINTMENT_STATUSES.join('|')}` });
+    }
+  }
+  const notesProvided = notes !== undefined;
+  const cleanNotes = notes === undefined || notes === null ? null : String(notes).trim() || null;
+  const doctorProvided = doctor_id !== undefined && doctor_id !== null && String(doctor_id).trim() !== '';
+  let requestedDoctorId = null;
+  if (doctorProvided) {
+    requestedDoctorId = Number(doctor_id);
+    if (!Number.isInteger(requestedDoctorId) || requestedDoctorId < 1) {
+      return res.status(400).json({ error: 'doctor_id must be a positive integer' });
+    }
+  }
+  if (!nextStatus && !notesProvided && !doctorProvided) {
+    return res.status(400).json({ error: 'No fields to update' });
+  }
+
+  const client = await pool.connect();
+  let released = false;
+  const releaseClient = () => {
+    if (!released) { released = true; client.release(); }
+  };
+  try {
+    await client.query('BEGIN');
+
+    let targetDoctorProfileId = null;
+    if (doctorProvided) {
+      let docQ = await client.query('SELECT id FROM doctors WHERE id=$1', [requestedDoctorId]);
+      if (!docQ.rows.length) {
+        docQ = await client.query('SELECT id FROM doctors WHERE user_id=$1', [requestedDoctorId]);
+      }
+      if (!docQ.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Doctor profile not found' });
+      }
+      targetDoctorProfileId = docQ.rows[0].id;
+      const availQ = await client.query(
+        `SELECT 1 FROM doctors d JOIN users u ON u.id = d.user_id
+          WHERE d.id=$1 AND u.role='doctor' AND COALESCE(u.active, TRUE) = TRUE`,
+        [targetDoctorProfileId]
+      );
+      if (!availQ.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Selected doctor is not available for assignment' });
       }
     }
-    const notesProvided = notes !== undefined;
-    const cleanNotes = notes === undefined || notes === null ? null : String(notes).trim() || null;
-    if (!nextStatus && !notesProvided) {
-      return res.status(400).json({ error: 'No fields to update' });
-    }
 
-    // One statement, canonical status only. `notes` is replaced when the
-    // caller sent the field (an explicit empty string clears the note). The
-    // CTE locks the row and captures its current status, so the transition
-    // guard and the write see the same row version: a concurrent request that
-    // already moved the visit cannot be overwritten. `done` and `cancelled`
-    // are terminal unless the clinic adopts an explicit reopening policy.
-    const fromStatuses = nextStatus ? allowedFromStatuses(nextStatus) : null;
-    const transitionGuard = fromStatuses
-      ? `AND ${canonicalStatusSql('prev.status')} IN (${fromStatuses.map((s) => `'${s}'`).join(', ')})`
-      : '';
-
-    const q = await pool.query(
-      `WITH prev AS (
-         SELECT id, status FROM appointments WHERE id=$4 FOR UPDATE
-       )
-       UPDATE appointments a
-       SET status = COALESCE($1, a.status),
-           notes = CASE WHEN $2 THEN $3 ELSE a.notes END
-       FROM prev
-       WHERE a.id = prev.id ${transitionGuard}
-       RETURNING a.*, prev.status AS previous_status`,
-      [nextStatus, notesProvided, cleanNotes, appointmentId]
+    const curRowQ = await client.query(
+      `SELECT id, status, notes, doctor_id, token_number,
+              COALESCE(scheduled_at, date_time) AS scheduled_at_effective
+         FROM appointments WHERE id=$1 FOR UPDATE`,
+      [appointmentId]
     );
-    if (!q.rows.length) {
-      const curQ = await pool.query(
-        `SELECT ${canonicalStatusSql('status')} AS status FROM appointments WHERE id=$1`,
-        [appointmentId]
-      );
-      if (!curQ.rows.length) return res.status(404).json({ error: 'Appointment not found' });
-      return res.status(409).json({
-        error: `Cannot change appointment from '${curQ.rows[0].status}' to '${nextStatus}'`,
-      });
+    if (!curRowQ.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Appointment not found' });
     }
-    const previousStatus = normalizeAppointmentStatus(q.rows[0].previous_status);
-    const statusChanged = Boolean(nextStatus) && nextStatus !== previousStatus;
+    const curRow = curRowQ.rows[0];
+    const previousStatus = normalizeAppointmentStatus(curRow.status);
+    const previousNotes = curRow.notes ? String(curRow.notes).trim() : null;
+    const previousDoctorId = curRow.doctor_id ? Number(curRow.doctor_id) : null;
 
-    // Best-effort patient notification (never fails the update).
+    if (nextStatus) {
+      const fromStatuses = allowedFromStatuses(nextStatus);
+      if (!fromStatuses || !fromStatuses.includes(previousStatus)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `Cannot change appointment from '${previousStatus || curRow.status}' to '${nextStatus}'`,
+        });
+      }
+    }
+
+    const doctorChanged = Boolean(targetDoctorProfileId) && targetDoctorProfileId !== previousDoctorId;
+    if (doctorChanged && ['done', 'cancelled'].includes(previousStatus)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Cannot reassign doctor on a completed or cancelled appointment' });
+    }
+
+    let nextTokenNumber = curRow.token_number;
+    if (doctorChanged && curRow.scheduled_at_effective) {
+      const schedISO = new Date(curRow.scheduled_at_effective).toISOString();
+      const dayStr = schedISO.slice(0, 10);
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `appt:${targetDoctorProfileId}:${dayStr}`,
+      ]);
+      const tokenQ = await client.query(
+        `SELECT COALESCE(MAX(token_number), 0) + 1 AS next_token
+           FROM appointments
+          WHERE doctor_id=$1
+            AND DATE(COALESCE(scheduled_at, date_time)) = DATE($2)`,
+        [targetDoctorProfileId, schedISO]
+      );
+      nextTokenNumber = tokenQ.rows[0].next_token;
+    }
+
+    const updQ = await client.query(
+      `UPDATE appointments
+          SET status = COALESCE($1, status),
+              notes = CASE WHEN $2 THEN $3 ELSE notes END,
+              doctor_id = COALESCE($4, doctor_id),
+              token_number = $5
+        WHERE id = $6
+        RETURNING *`,
+      [
+        nextStatus,
+        notesProvided,
+        cleanNotes,
+        doctorChanged ? targetDoctorProfileId : null,
+        nextTokenNumber,
+        appointmentId,
+      ]
+    );
+
+    await client.query('COMMIT');
+    releaseClient();
+
+    const updatedAppointment = updQ.rows[0];
+    const statusChanged = Boolean(nextStatus) && nextStatus !== previousStatus;
+    const notesChanged = notesProvided && Boolean(cleanNotes) && cleanNotes !== previousNotes;
+
+    // Best-effort owner-scoped notifications (never fails the update).
     try {
-      const { notifyAppointmentOwner } = require('../utils/push');
+      const { notifyAppointmentOwner, notifyUser } = require('../utils/push');
       const msg = cleanNotes || '';
-      // Do not re-notify when the status was already the requested one.
-      if (!statusChanged) {
-        // no status change — nothing to announce
-      } else if (nextStatus === 'confirmed') {
-        await notifyAppointmentOwner(appointmentId, 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
-      } else if (nextStatus === 'cancelled') {
-        await notifyAppointmentOwner(appointmentId, 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
-      } else if (nextStatus === 'done') {
-        await notifyAppointmentOwner(appointmentId, 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
-      } else if (notesProvided && cleanNotes) {
-        // "Send message" without a status change: tell the patient a note is waiting.
+      if (statusChanged) {
+        if (nextStatus === 'confirmed') {
+          await notifyAppointmentOwner(appointmentId, 'Visit confirmed', msg || 'Your visit request was accepted. Please arrive 10 minutes early.');
+        } else if (nextStatus === 'cancelled') {
+          await notifyAppointmentOwner(appointmentId, 'Visit cancelled', msg || 'Your visit request was declined. Contact the clinic for another slot.');
+        } else if (nextStatus === 'done') {
+          await notifyAppointmentOwner(appointmentId, 'Visit completed', msg || 'Your visit is marked done. Check your prescriptions and bills in the app.');
+        }
+      } else if (notesChanged) {
+        // "Send message" without a status change: notify only this appointment's patient.
         await notifyAppointmentOwner(appointmentId, 'Message from Hepziba Clinic', cleanNotes);
+      }
+
+      if (doctorChanged) {
+        const dQ = await pool.query('SELECT user_id FROM doctors WHERE id=$1', [targetDoctorProfileId]);
+        const docUserId = dQ.rows[0]?.user_id;
+        if (docUserId) {
+          await notifyUser(
+            docUserId,
+            'Appointment assigned',
+            'An appointment has been assigned to you. Open the portal to view details.',
+            { appointmentId }
+          );
+        }
       }
     } catch (pushErr) {
       console.error('Push notification failed:', pushErr.message);
     }
 
-    // `previous_status` is internal bookkeeping for the notification decision.
-    const { previous_status: _previousStatus, ...updatedAppointment } = q.rows[0];
     res.json({ message: 'Appointment updated', appointment: updatedAppointment });
   } catch (e) {
+    if (!released) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    }
     console.error('Unexpected error in updateAppointmentStatus:', e);
     res.status(500).json({ error: 'Failed to update appointment' });
+  } finally {
+    releaseClient();
   }
 };
 

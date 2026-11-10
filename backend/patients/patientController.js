@@ -338,11 +338,25 @@ exports.listPatients = async (req, res) => {
   }
 };
 
+function parseEhrWindow(req, prefix, defaultLimit = 15, maxLimit = 50) {
+  let limit = Number(req.query[`${prefix}_limit`] ?? req.query.limit ?? defaultLimit);
+  let offset = Number(req.query[`${prefix}_offset`] ?? req.query.offset ?? 0);
+  if (!Number.isInteger(limit) || limit < 1) limit = defaultLimit;
+  if (limit > maxLimit) limit = maxLimit;
+  if (!Number.isInteger(offset) || offset < 0) offset = 0;
+  return { limit, offset };
+}
+
 // Get full patient profile + EHR history (Admin & Doctor)
 exports.getPatientById = async (req, res) => {
   try {
     const patientId = Number(req.params.id);
     if (!Number.isInteger(patientId)) return res.status(400).json({ error: 'Invalid patient ID' });
+
+    const only = typeof req.query.only === 'string' ? req.query.only.trim().toLowerCase() : '';
+    const apptWin = parseEhrWindow(req, 'appt');
+    const rxWin = parseEhrWindow(req, 'rx');
+    const invWin = parseEhrWindow(req, 'inv');
 
     const patientQ = await pool.query(
       `SELECT 
@@ -389,52 +403,80 @@ exports.getPatientById = async (req, res) => {
       canSeeInvoices = assignedQ.rows.length > 0;
     }
 
-    // Recent appointments
-    const appQ = await pool.query(
-      `SELECT a.*, COALESCE(a.scheduled_at, a.date_time) AS scheduled_at_effective, du.name AS doctor_name
-       FROM appointments a
-       LEFT JOIN doctors d ON d.id = a.doctor_id
-       LEFT JOIN users du ON du.id = d.user_id
-       WHERE a.patient_id=$1
-       ORDER BY COALESCE(a.scheduled_at, a.date_time) DESC
-       LIMIT 15`,
-      [patientId]
-    );
+    // Batched appointments (fetch limit + 1 to detect whether more exist)
+    let appointments = [];
+    let appointmentsHasMore = false;
+    if (!only || only === 'appointments') {
+      const appQ = await pool.query(
+        `SELECT a.*, COALESCE(a.scheduled_at, a.date_time) AS scheduled_at_effective, du.name AS doctor_name
+         FROM appointments a
+         LEFT JOIN doctors d ON d.id = a.doctor_id
+         LEFT JOIN users du ON du.id = d.user_id
+         WHERE a.patient_id=$1
+         ORDER BY COALESCE(a.scheduled_at, a.date_time) DESC, a.id DESC
+         LIMIT $2 OFFSET $3`,
+        [patientId, apptWin.limit + 1, apptWin.offset]
+      );
+      appointmentsHasMore = appQ.rows.length > apptWin.limit;
+      appointments = appQ.rows.slice(0, apptWin.limit);
+    }
 
-    // Recent prescriptions
-    const rxQ = await pool.query(
-      `SELECT pr.*, json_agg(pi.*) AS items
-       FROM prescriptions pr
-       LEFT JOIN prescription_items pi ON pi.prescription_id = pr.id
-       WHERE pr.patient_id=$1
-       GROUP BY pr.id
-       ORDER BY pr.prescribed_on DESC
-       LIMIT 15`,
-      [patientId]
-    );
+    // Batched prescriptions with joined doctor_name and ordered items
+    let prescriptions = [];
+    let prescriptionsHasMore = false;
+    if (!only || only === 'prescriptions') {
+      const rxQ = await pool.query(
+        `SELECT pr.*,
+                COALESCE(pr.doctor_name, du.name) AS doctor_name,
+                COALESCE(json_agg(pi.* ORDER BY pi.id ASC) FILTER (WHERE pi.id IS NOT NULL), '[]'::json) AS items
+         FROM prescriptions pr
+         LEFT JOIN doctors d ON d.id = pr.doctor_id
+         LEFT JOIN users du ON du.id = d.user_id
+         LEFT JOIN prescription_items pi ON pi.prescription_id = pr.id
+         WHERE pr.patient_id=$1
+         GROUP BY pr.id, du.name
+         ORDER BY pr.prescribed_on DESC, pr.id DESC
+         LIMIT $2 OFFSET $3`,
+        [patientId, rxWin.limit + 1, rxWin.offset]
+      );
+      prescriptionsHasMore = rxQ.rows.length > rxWin.limit;
+      prescriptions = rxQ.rows.slice(0, rxWin.limit).map((r) => ({
+        ...r,
+        items: Array.isArray(r.items) ? r.items : [],
+      }));
+    }
 
-    // Recent invoices (skipped entirely when the caller is not allowed to see
+    // Batched invoices (skipped entirely when the caller is not allowed to see
     // them, so an unrelated doctor cannot read billing data from the chart).
     let invoiceRows = [];
-    if (canSeeInvoices) {
+    let invoicesHasMore = false;
+    if (canSeeInvoices && (!only || only === 'invoices')) {
       const invQ = await pool.query(
-        `SELECT inv.*, json_agg(ii.*) AS items
+        `SELECT inv.*,
+                COALESCE(json_agg(ii.* ORDER BY ii.id ASC) FILTER (WHERE ii.id IS NOT NULL), '[]'::json) AS items
          FROM invoices inv
          LEFT JOIN invoice_items ii ON ii.invoice_id = inv.id
          WHERE inv.patient_id=$1
          GROUP BY inv.id
-         ORDER BY inv.invoice_date DESC
-         LIMIT 15`,
-        [patientId]
+         ORDER BY inv.invoice_date DESC, inv.id DESC
+         LIMIT $2 OFFSET $3`,
+        [patientId, invWin.limit + 1, invWin.offset]
       );
-      invoiceRows = invQ.rows.map(r => ({ ...r, items: (r.items && r.items[0] !== null) ? r.items : [] }));
+      invoicesHasMore = invQ.rows.length > invWin.limit;
+      invoiceRows = invQ.rows.slice(0, invWin.limit).map((r) => ({
+        ...r,
+        items: Array.isArray(r.items) ? r.items : [],
+      }));
     }
 
     const chart = {
       ...patient,
-      appointments: appQ.rows,
-      prescriptions: rxQ.rows.map(r => ({ ...r, items: (r.items && r.items[0] !== null) ? r.items : [] })),
-      invoices: invoiceRows
+      appointments,
+      appointments_has_more: appointmentsHasMore,
+      prescriptions,
+      prescriptions_has_more: prescriptionsHasMore,
+      invoices: invoiceRows,
+      invoices_has_more: invoicesHasMore,
     };
     // Aadhaar/mobile masked by default; admins may ask for originals when
     // editing demographics (`?reveal=contact`). Doctors always get masked.

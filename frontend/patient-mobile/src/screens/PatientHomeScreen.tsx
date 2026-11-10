@@ -77,6 +77,19 @@ type Props = { user: User; onLogout: () => void };
 type TabKey = 'home' | 'book' | 'records' | 'profile' | 'clinic';
 
 const PRIORITY_OPTIONS = ['normal', 'urgent'];
+const BATCH_SIZE = 20;
+
+function mergeById<T extends { id: number }>(existing: T[], incoming: T[], prepend = false): T[] {
+  const map = new Map<number, T>();
+  if (prepend) {
+    for (const item of incoming) map.set(item.id, item);
+    for (const item of existing) if (!map.has(item.id)) map.set(item.id, item);
+  } else {
+    for (const item of existing) map.set(item.id, item);
+    for (const item of incoming) map.set(item.id, item);
+  }
+  return Array.from(map.values());
+}
 
 // Notification identifiers already handled in this app process, so a cold-start
 // launch response and the live tap listener cannot open the same record twice.
@@ -155,6 +168,10 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
   const [highlightAppointmentId, setHighlightAppointmentId] = useState<number | null>(null);
 
   const [loading, setLoading] = useState(false);
+  const [hasMoreAppts, setHasMoreAppts] = useState(false);
+  const [hasMoreRx, setHasMoreRx] = useState(false);
+  const [hasMoreInvoices, setHasMoreInvoices] = useState(false);
+  const [loadingMore, setLoadingMore] = useState<'appts' | 'rx' | 'invoices' | null>(null);
   const [errorText, setErrorText] = useState('');
   const [infoText, setInfoText] = useState('');
   const [isOffline, setIsOffline] = useState(false);
@@ -208,11 +225,11 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
     setIsOffline(false);
     try {
       const [apps, docs, me, rx, bills] = await Promise.allSettled([
-        apiGet('/appointments/my'),
+        apiGet(`/appointments/my?limit=${BATCH_SIZE}&offset=0`),
         apiGet('/appointments/catalog/doctors'),
         apiGet('/patients/me?reveal=contact'),
-        apiGet('/prescriptions/my'),
-        apiGet('/billing/my'),
+        apiGet(`/prescriptions/my?limit=${BATCH_SIZE}&offset=0`),
+        apiGet(`/billing/my?limit=${BATCH_SIZE}&offset=0`),
       ]);
 
       const offlineHits = [apps, docs, me, rx, bills].filter(
@@ -232,10 +249,13 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
         bills.status === 'fulfilled' && Array.isArray(bills.value) ? bills.value : [];
 
       setAppointments(appsData);
+      setHasMoreAppts(appsData.length === BATCH_SIZE);
       setDoctors(docsData);
       setProfile(meData || null);
       setPrescriptions(rxData);
+      setHasMoreRx(rxData.length === BATCH_SIZE);
       setInvoices(billsData);
+      setHasMoreInvoices(billsData.length === BATCH_SIZE);
 
       if (meData) {
         setProfileDraft({
@@ -264,6 +284,60 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
       setLoading(false);
     }
   }, [apiGet]);
+
+  const loadMoreAppointments = useCallback(async () => {
+    if (loadingMore) return;
+    setLoadingMore('appts');
+    try {
+      const next = await apiGet<Appointment[]>(
+        `/appointments/my?limit=${BATCH_SIZE}&offset=${appointments.length}`,
+      );
+      if (Array.isArray(next)) {
+        setAppointments((prev) => mergeById(prev, next));
+        setHasMoreAppts(next.length === BATCH_SIZE);
+      }
+    } catch (e) {
+      setErrorText(e instanceof Error ? e.message : 'Failed to load more appointments');
+    } finally {
+      setLoadingMore(null);
+    }
+  }, [appointments.length, loadingMore]);
+
+  const loadMorePrescriptions = useCallback(async () => {
+    if (loadingMore) return;
+    setLoadingMore('rx');
+    try {
+      const next = await apiGet<Prescription[]>(
+        `/prescriptions/my?limit=${BATCH_SIZE}&offset=${prescriptions.length}`,
+      );
+      if (Array.isArray(next)) {
+        setPrescriptions((prev) => mergeById(prev, next));
+        setHasMoreRx(next.length === BATCH_SIZE);
+      }
+    } catch (e) {
+      setErrorText(e instanceof Error ? e.message : 'Failed to load more prescriptions');
+    } finally {
+      setLoadingMore(null);
+    }
+  }, [prescriptions.length, loadingMore]);
+
+  const loadMoreInvoices = useCallback(async () => {
+    if (loadingMore) return;
+    setLoadingMore('invoices');
+    try {
+      const next = await apiGet<Invoice[]>(
+        `/billing/my?limit=${BATCH_SIZE}&offset=${invoices.length}`,
+      );
+      if (Array.isArray(next)) {
+        setInvoices((prev) => mergeById(prev, next));
+        setHasMoreInvoices(next.length === BATCH_SIZE);
+      }
+    } catch (e) {
+      setErrorText(e instanceof Error ? e.message : 'Failed to load more invoices');
+    } finally {
+      setLoadingMore(null);
+    }
+  }, [invoices.length, loadingMore]);
 
   useEffect(() => {
     void loadAll();
@@ -295,14 +369,14 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
           const body = content?.body;
           const text = body ? (title ? `${title}: ${body}` : body) : 'Update from clinic — refreshing your visits…';
           setInfoText(text);
-          void apiGet('/appointments/my')
+          void apiGet(`/appointments/my?limit=${BATCH_SIZE}&offset=0`)
             .then((apps) => {
-              if (Array.isArray(apps)) setAppointments(apps);
+              if (Array.isArray(apps)) setAppointments((prev) => mergeById(prev, apps, true));
             })
             .catch(() => {});
-          void apiGet('/billing/my')
+          void apiGet(`/billing/my?limit=${BATCH_SIZE}&offset=0`)
             .then((bills) => {
-              if (Array.isArray(bills)) setInvoices(bills);
+              if (Array.isArray(bills)) setInvoices((prev) => mergeById(prev, bills, true));
             })
             .catch(() => {});
         });
@@ -325,11 +399,11 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
           setTab('records');
           try {
             const [apps, bills] = await Promise.all([
-              apiGet('/appointments/my'),
-              apiGet('/billing/my'),
+              apiGet(`/appointments/my?limit=${BATCH_SIZE}&offset=0`),
+              apiGet(`/billing/my?limit=${BATCH_SIZE}&offset=0`),
             ]);
-            if (Array.isArray(apps)) setAppointments(apps);
-            if (Array.isArray(bills)) setInvoices(bills);
+            if (Array.isArray(apps)) setAppointments((prev) => mergeById(prev, apps, true));
+            if (Array.isArray(bills)) setInvoices((prev) => mergeById(prev, bills, true));
             const owned = Number.isInteger(id) && id > 0 && Array.isArray(apps)
               && apps.some((a: Appointment) => a.id === id);
             setHighlightAppointmentId(owned ? id : null);
@@ -361,7 +435,7 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
       notifySub?.remove();
       respondSub?.remove();
     };
-  }, [apiGet, loadAll]);
+  }, [apiGet, loadAll, user.id]);
 
   // Auto-refresh permission and token when user returns to app (e.g. from phone Settings)
   useEffect(() => {
@@ -386,15 +460,17 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
     return () => sub.remove();
   }, []);
 
-  // Live status: re-check visit decisions by itself every 30s so an admin
-  // Accept/Decline flips pending → approved without manual refresh.
+  // Live status: re-check visit decisions by itself every 30s while app is
+  // active so an admin Accept/Decline flips pending -> approved without
+  // manual refresh, and merge into loaded batches without wiping history.
   useEffect(() => {
     const id = setInterval(async () => {
+      if (AppState.currentState !== 'active') return;
       try {
-        const apps = await apiGet('/appointments/my');
-        if (Array.isArray(apps)) setAppointments(apps);
-        const bills = await apiGet('/billing/my');
-        if (Array.isArray(bills)) setInvoices(bills);
+        const apps = await apiGet(`/appointments/my?limit=${BATCH_SIZE}&offset=0`);
+        if (Array.isArray(apps)) setAppointments((prev) => mergeById(prev, apps, true));
+        const bills = await apiGet(`/billing/my?limit=${BATCH_SIZE}&offset=0`);
+        if (Array.isArray(bills)) setInvoices((prev) => mergeById(prev, bills, true));
       } catch {
         // Silent: next tick retries; errors surface on full load.
       }
@@ -435,11 +511,18 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
 
   const selectedDoctor = doctors.find((d) => d.doctor_id === selectedDoctorId) || null;
 
-  // Single-doctor clinic: no choosing needed. Auto-assign the first listed
-  // doctor so booking never blocks on "Please select a doctor".
+  // Auto-select only when the clinic has a single active doctor. When multiple
+  // doctors exist, require the patient to pick so every booking doesn't pile
+  // onto the first doctor by default.
   useEffect(() => {
-    if (selectedDoctorId === null && doctors.length > 0) {
+    if (doctors.length === 1 && selectedDoctorId === null) {
       setSelectedDoctorId(doctors[0].doctor_id);
+    } else if (
+      selectedDoctorId !== null &&
+      doctors.length > 0 &&
+      !doctors.some((d) => d.doctor_id === selectedDoctorId)
+    ) {
+      setSelectedDoctorId(doctors.length === 1 ? doctors[0].doctor_id : null);
     }
   }, [doctors, selectedDoctorId]);
 
@@ -520,6 +603,10 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
 
   const submitBooking = async () => {
     if (bookingInFlight) return;
+    if (doctors.length > 1 && selectedDoctorId === null) {
+      setErrorText('Please choose a doctor for your visit.');
+      return;
+    }
     const reason = reasonInput.trim();
     const symptoms = symptomsInput.trim();
     if (!reason) {
@@ -546,9 +633,8 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
         ? `Age:${profile.age || '-'} Sex:${profile.sex || '-'} BP:${profile.bp || '-'} SpO2:${profile.spo2 ?? '-'} Mobile:${profile.mobile || '-'}`
         : '';
       const notes = `Priority:${priorityInput}; Symptoms:${symptoms}; ${profileContext}`.trim();
-      // Doctor is assigned server-side (single-doctor clinic); include it
-      // only when already known.
-      const doctorId = selectedDoctorId ?? doctors[0]?.doctor_id ?? null;
+      const doctorId =
+        selectedDoctorId ?? (doctors.length === 1 ? doctors[0]?.doctor_id ?? null : null);
 
       // Shared client handles token refresh + 401 logout, so an expired
       // access token no longer forces the patient to sign in again.
@@ -914,7 +1000,10 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
                         <Text style={s.rowTitle}>{latestRx.doctor_name || 'Doctor'}</Text>
                         <Text style={s.rowMeta}>
                           {[latestRx.prescribed_on ? new Date(latestRx.prescribed_on).toLocaleDateString() : '',
-                            latestRx.items.map((i) => i.medicine_name).join(', ') || 'No items']
+                            (Array.isArray(latestRx.items) ? latestRx.items : [])
+                              .map((i) => i.medicine_name)
+                              .filter(Boolean)
+                              .join(', ') || 'No items']
                             .filter(Boolean).join(' • ')}
                         </Text>
                       </View>
@@ -1087,22 +1176,41 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
           <>
             <SectionCard title="Appointments">
               {appointments.length ? (
-                appointments.map((app) => (
-                  <Card
-                    key={app.id}
-                    style={[
-                      { marginBottom: SPACING.s },
-                      highlightAppointmentId === app.id ? s.highlightCard : null,
-                    ]}
-                  >
-                    <Card.Content>
-                      <Text style={s.rowTitle}>{formatDate(app)}</Text>
-                      <Text style={s.rowMeta}>Doctor: {app.doctor_name || '-'}</Text>
-                      <Text style={s.rowMeta}>Status: {app.status}</Text>
-                      {!!app.notes && <Text style={s.rowMeta}>Clinic message: {app.notes}</Text>}
-                    </Card.Content>
-                  </Card>
-                ))
+                <>
+                  {appointments.map((app) => (
+                    <Card
+                      key={app.id}
+                      style={[
+                        { marginBottom: SPACING.s },
+                        highlightAppointmentId === app.id ? s.highlightCard : null,
+                      ]}
+                    >
+                      <Card.Content>
+                        <Text style={s.rowTitle}>{formatDate(app)}</Text>
+                        <Text style={s.rowMeta}>Doctor: {app.doctor_name || '-'}</Text>
+                        {app.token_number ? (
+                          <Text style={s.rowMeta}>Token: #{app.token_number}</Text>
+                        ) : null}
+                        <Text style={s.rowMeta}>Status: {app.status}</Text>
+                        {!!app.reason && <Text style={s.rowMeta}>Reason: {app.reason}</Text>}
+                        {!!app.notes && <Text style={s.rowMeta}>Clinic message: {app.notes}</Text>}
+                      </Card.Content>
+                    </Card>
+                  ))}
+                  {hasMoreAppts && (
+                    <Button
+                      mode="outlined"
+                      onPress={() => void loadMoreAppointments()}
+                      loading={loadingMore === 'appts'}
+                      disabled={loadingMore !== null}
+                      style={s.secondaryBtn}
+                      contentStyle={s.btnContent}
+                      labelStyle={s.secondaryBtnText}
+                    >
+                      Load more appointments
+                    </Button>
+                  )}
+                </>
               ) : (
                 <Text style={s.rowMeta}>No appointments yet.</Text>
               )}
@@ -1110,24 +1218,42 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
 
             <SectionCard title="Prescriptions">
               {prescriptions.length ? (
-                prescriptions.map((p) => (
-                  <TouchableOpacity
-                    key={p.id}
-                    onPress={() => navigation.navigate('PrescriptionDetail', { prescription: p })}
-                  >
-                    <Card style={{ marginBottom: SPACING.s }}>
-                      <Card.Content>
-                        <Text style={s.rowTitle}>{p.doctor_name || 'Doctor'}</Text>
-                        <Text style={s.rowMeta}>
-                          {p.prescribed_on ? new Date(p.prescribed_on).toLocaleString() : ''}
-                        </Text>
-                        <Text style={s.rowMeta}>
-                          {p.items.map((i) => i.medicine_name).join(', ') || 'No items'}
-                        </Text>
-                      </Card.Content>
-                    </Card>
-                  </TouchableOpacity>
-                ))
+                <>
+                  {prescriptions.map((p) => {
+                    const rxItems = Array.isArray(p.items) ? p.items : [];
+                    return (
+                      <TouchableOpacity
+                        key={p.id}
+                        onPress={() => navigation.navigate('PrescriptionDetail', { prescription: p })}
+                      >
+                        <Card style={{ marginBottom: SPACING.s }}>
+                          <Card.Content>
+                            <Text style={s.rowTitle}>{p.doctor_name || 'Clinic Doctor'}</Text>
+                            <Text style={s.rowMeta}>
+                              {p.prescribed_on ? new Date(p.prescribed_on).toLocaleString() : ''}
+                            </Text>
+                            <Text style={s.rowMeta}>
+                              {rxItems.map((i) => i.medicine_name).filter(Boolean).join(', ') || 'No items'}
+                            </Text>
+                          </Card.Content>
+                        </Card>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  {hasMoreRx && (
+                    <Button
+                      mode="outlined"
+                      onPress={() => void loadMorePrescriptions()}
+                      loading={loadingMore === 'rx'}
+                      disabled={loadingMore !== null}
+                      style={s.secondaryBtn}
+                      contentStyle={s.btnContent}
+                      labelStyle={s.secondaryBtnText}
+                    >
+                      Load more prescriptions
+                    </Button>
+                  )}
+                </>
               ) : (
                 <Text style={s.rowMeta}>No prescriptions yet.</Text>
               )}
@@ -1135,27 +1261,42 @@ function PatientHomeScreenContent({ user, onLogout }: Props) {
 
             <SectionCard title="Invoices">
               {invoices.length ? (
-                invoices.map((invoice) => (
-                  <TouchableOpacity
-                    key={invoice.id}
-                    onPress={() => navigation.navigate('InvoiceDetail', { invoice })}
-                  >
-                    <Card style={{ marginBottom: SPACING.s }}>
-                      <Card.Content>
-                        <Text style={s.rowTitle}>Invoice #{invoice.id}</Text>
-                        <Text style={s.rowMeta}>
-                          {invoice.invoice_date
-                            ? new Date(invoice.invoice_date).toLocaleDateString()
-                            : ''}
-                        </Text>
-                        <Text style={s.rowMeta}>
-                          Amount: Rs {Number(invoice.total_amount || 0).toFixed(2)}
-                        </Text>
-                        <Text style={s.rowMeta}>Status: {invoice.status || 'unpaid'}</Text>
-                      </Card.Content>
-                    </Card>
-                  </TouchableOpacity>
-                ))
+                <>
+                  {invoices.map((invoice) => (
+                    <TouchableOpacity
+                      key={invoice.id}
+                      onPress={() => navigation.navigate('InvoiceDetail', { invoice })}
+                    >
+                      <Card style={{ marginBottom: SPACING.s }}>
+                        <Card.Content>
+                          <Text style={s.rowTitle}>Invoice #{invoice.id}</Text>
+                          <Text style={s.rowMeta}>
+                            {invoice.invoice_date
+                              ? new Date(invoice.invoice_date).toLocaleDateString()
+                              : ''}
+                          </Text>
+                          <Text style={s.rowMeta}>
+                            Amount: Rs {Number(invoice.total_amount || 0).toFixed(2)}
+                          </Text>
+                          <Text style={s.rowMeta}>Status: {invoice.status || 'unpaid'}</Text>
+                        </Card.Content>
+                      </Card>
+                    </TouchableOpacity>
+                  ))}
+                  {hasMoreInvoices && (
+                    <Button
+                      mode="outlined"
+                      onPress={() => void loadMoreInvoices()}
+                      loading={loadingMore === 'invoices'}
+                      disabled={loadingMore !== null}
+                      style={s.secondaryBtn}
+                      contentStyle={s.btnContent}
+                      labelStyle={s.secondaryBtnText}
+                    >
+                      Load more invoices
+                    </Button>
+                  )}
+                </>
               ) : (
                 <Text style={s.rowMeta}>No invoices yet.</Text>
               )}

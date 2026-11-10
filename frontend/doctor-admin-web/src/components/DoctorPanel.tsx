@@ -35,8 +35,19 @@ type History = {
 } | null;
 
 export default function DoctorPanel() {
-  const { appointments, loading, error, setError, load, updateStatus, createPrescription, getPrescription } =
-    useDoctorAppointments();
+  const {
+    appointments,
+    loading,
+    loadingMore,
+    hasMore,
+    error,
+    setError,
+    load,
+    loadMore,
+    updateStatus,
+    createPrescription,
+    getPrescription,
+  } = useDoctorAppointments();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [status, setStatus] = useState('confirmed');
   const [notes, setNotes] = useState('');
@@ -90,6 +101,7 @@ export default function DoctorPanel() {
     // synchronously (react-hooks/set-state-in-effect).
     const timer = setTimeout(() => {
       if (!alive) return;
+      setHistory(null);
       setHistoryLoading(true);
       getPrescription(selectedId)
         .then((h) => {
@@ -262,6 +274,13 @@ export default function DoctorPanel() {
                 total={search.total}
                 label="Appointments"
               />
+              {hasMore && (
+                <div style={{ marginTop: 10, textAlign: 'center' }}>
+                  <button type="button" className="ghostBtn" onClick={loadMore} disabled={loadingMore}>
+                    {loadingMore ? 'Loading more…' : 'Load more appointments'}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </section>
@@ -283,25 +302,27 @@ export default function DoctorPanel() {
                   {(selected.bp || selected.spo2) ? (
                     <p className="muted">BP {String(selected.bp ?? '—')} · SpO2 {String(selected.spo2 ?? '—')}</p>
                   ) : null}
-                  <button
-                    type="button"
-                    className="ghostBtn"
-                    style={{ marginTop: 8 }}
-                    onClick={() =>
-                      setEhrPatient({
-                        id: Number(selected.patient_id) || selected.id,
-                        name: String(selected.patient_name || 'Patient'),
-                        patient_code: typeof selected.patient_code === 'string' ? selected.patient_code : undefined,
-                        mobile: typeof selected.mobile === 'string' ? selected.mobile : undefined,
-                        bp: typeof selected.bp === 'string' ? selected.bp : undefined,
-                        spo2: typeof selected.spo2 === 'number' || typeof selected.spo2 === 'string' ? selected.spo2 : undefined,
-                        age: typeof selected.age === 'number' ? selected.age : undefined,
-                        sex: typeof selected.sex === 'string' ? selected.sex : undefined,
-                      })
-                    }
-                  >
-                    View full EHR
-                  </button>
+                  {Number(selected.patient_id) > 0 && (
+                    <button
+                      type="button"
+                      className="ghostBtn"
+                      style={{ marginTop: 8 }}
+                      onClick={() =>
+                        setEhrPatient({
+                          id: Number(selected.patient_id),
+                          name: String(selected.patient_name || 'Patient'),
+                          patient_code: typeof selected.patient_code === 'string' ? selected.patient_code : undefined,
+                          mobile: typeof selected.mobile === 'string' ? selected.mobile : undefined,
+                          bp: typeof selected.bp === 'string' ? selected.bp : undefined,
+                          spo2: typeof selected.spo2 === 'number' || typeof selected.spo2 === 'string' ? selected.spo2 : undefined,
+                          age: typeof selected.age === 'number' ? selected.age : undefined,
+                          sex: typeof selected.sex === 'string' ? selected.sex : undefined,
+                        })
+                      }
+                    >
+                      View full EHR
+                    </button>
+                  )}
                 </div>
                 <div>
                   <p className="label">Schedule</p>

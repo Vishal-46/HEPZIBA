@@ -41,12 +41,12 @@ function decodeAccessExp(token) {
   return new Date(Date.now() + 15 * 60 * 1000);
 }
 
-async function issueSession(userRow, meta = {}) {
+async function issueSession(userRow, meta = {}, queryable = pool) {
   const user = { id: userRow.id, name: userRow.name, email: userRow.email, role: userRow.role };
   const token = signAccessToken(user);
   const refreshToken = newOpaqueToken();
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000);
-  await pool.query(
+  await queryable.query(
     `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip)
      VALUES ($1, $2, $3, $4, $5)`,
     [user.id, sha256Hex(refreshToken), expiresAt, meta.userAgent || null, meta.ip || null],
@@ -54,8 +54,8 @@ async function issueSession(userRow, meta = {}) {
   return { token, refreshToken, refreshExpiresAt: expiresAt.toISOString(), user };
 }
 
-async function revokeRefreshFamily(userId) {
-  await pool.query(
+async function revokeRefreshFamily(userId, queryable = pool) {
+  await queryable.query(
     `UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, NOW())
      WHERE user_id = $1 AND revoked_at IS NULL`,
     [userId],
@@ -64,44 +64,65 @@ async function revokeRefreshFamily(userId) {
 
 async function rotateRefreshToken(rawRefresh, meta = {}) {
   const hash = sha256Hex(rawRefresh);
-  const found = await pool.query('SELECT * FROM refresh_tokens WHERE token_hash = $1', [hash]);
-  if (!found.rows.length) {
-    const err = new Error('Invalid refresh token.');
-    err.status = 401;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query(
+      'SELECT * FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE',
+      [hash],
+    );
+    if (!found.rows.length) {
+      await client.query('ROLLBACK');
+      const err = new Error('Invalid refresh token.');
+      err.status = 401;
+      throw err;
+    }
+    const row = found.rows[0];
+    if (row.revoked_at) {
+      // Reuse of an already-rotated token: possible theft -> kill the family.
+      if (row.replaced_by_hash) await revokeRefreshFamily(row.user_id, client);
+      await client.query('COMMIT');
+      const err = new Error('Refresh token already used.');
+      err.status = 401;
+      throw err;
+    }
+    if (new Date(row.expires_at) < new Date()) {
+      await client.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [hash]);
+      await client.query('COMMIT');
+      const err = new Error('Refresh token expired.');
+      err.status = 401;
+      throw err;
+    }
+    const userRes = await client.query(
+      'SELECT id, name, email, role, active FROM users WHERE id = $1',
+      [row.user_id],
+    );
+    if (!userRes.rows.length || userRes.rows[0].active === false) {
+      await client.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [hash]);
+      await client.query('COMMIT');
+      const err = new Error('Account no longer available.');
+      err.status = 401;
+      throw err;
+    }
+    const user = userRes.rows[0];
+    const next = await issueSession(
+      { id: user.id, name: user.name, email: user.email, role: user.role },
+      meta,
+      client,
+    );
+    await client.query(
+      `UPDATE refresh_tokens SET revoked_at = NOW(), replaced_by_hash = $2
+       WHERE token_hash = $1 AND revoked_at IS NULL`,
+      [hash, sha256Hex(next.refreshToken)],
+    );
+    await client.query('COMMIT');
+    return next;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
     throw err;
+  } finally {
+    client.release();
   }
-  const row = found.rows[0];
-  if (row.revoked_at) {
-    // Reuse of an already-rotated token: possible theft -> kill the family.
-    if (row.replaced_by_hash) await revokeRefreshFamily(row.user_id);
-    const err = new Error('Refresh token already used.');
-    err.status = 401;
-    throw err;
-  }
-  if (new Date(row.expires_at) < new Date()) {
-    await pool.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [hash]);
-    const err = new Error('Refresh token expired.');
-    err.status = 401;
-    throw err;
-  }
-  const userRes = await pool.query('SELECT id, name, email, role, active FROM users WHERE id = $1', [row.user_id]);
-  if (!userRes.rows.length || userRes.rows[0].active === false) {
-    await pool.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [hash]);
-    const err = new Error('Account no longer available.');
-    err.status = 401;
-    throw err;
-  }
-  const user = userRes.rows[0];
-  const next = await issueSession(
-    { id: user.id, name: user.name, email: user.email, role: user.role },
-    meta,
-  );
-  await pool.query(
-    `UPDATE refresh_tokens SET revoked_at = NOW(), replaced_by_hash = $2
-     WHERE token_hash = $1 AND revoked_at IS NULL`,
-    [hash, sha256Hex(next.refreshToken)],
-  );
-  return next;
 }
 
 async function revokeRefreshToken(rawRefresh) {

@@ -10,6 +10,7 @@ const validate = require('../middleware/validate');
 router.post('/', roleAuth(['patient', 'admin', 'doctor']), [
     body('patient_id').optional().isInt({ min: 1 }).withMessage('patient_id must be an integer'),
     body('doctor_id').optional().isInt({ min: 1 }).withMessage('doctor_id must be an integer'),
+    body('auto_assign').optional().isIn(['first', 'least_busy']).withMessage('auto_assign must be first or least_busy'),
     body('scheduled_at').optional().isISO8601().withMessage('scheduled_at must be ISO8601'),
     body('date_time').optional().isISO8601().withMessage('date_time must be ISO8601'),
     body('reason').optional().trim(),
